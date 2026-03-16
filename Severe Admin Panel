@@ -1,0 +1,562 @@
+-- Admin Panel for Severe
+-- Press ; to open command bar
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ============================================
+-- NOCLIP SYSTEM
+-- ============================================
+local noclipEnabled = false
+local noclipConnection = nil
+
+local function enableNoclip()
+    if noclipConnection then return end
+    
+    noclipConnection = RunService.Render:Connect(function()
+        local character = LocalPlayer.Character
+        if not character then return end
+        
+        for _, part in pairs(character:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    end)
+    
+    noclipEnabled = true
+end
+
+local function disableNoclip()
+    if noclipConnection then
+        noclipConnection:Disconnect()
+        noclipConnection = nil
+    end
+    
+    local character = LocalPlayer.Character
+    if character then
+        for _, part in pairs(character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = true
+            end
+        end
+    end
+    
+    noclipEnabled = false
+end
+
+-- ============================================
+-- COMMAND SYSTEM
+-- ============================================
+local commands = {
+    {
+        name = "noclip",
+        description = "Walk through walls",
+        usage = ";noclip",
+        category = "Movement",
+        func = function(args)
+            enableNoclip()
+        end
+    },
+    {
+        name = "unnoclip",
+        description = "Disable noclip",
+        usage = ";unnoclip",
+        category = "Movement",
+        func = function(args)
+            disableNoclip()
+        end
+    },
+    {
+        name = "cmds",
+        description = "Opens command panel",
+        usage = ";cmds",
+        category = "Utility",
+        func = function(args)
+            toggleGUI()
+        end
+    },
+}
+
+local function executeCommand(input)
+    input = input:gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    
+    local parts = {}
+    for part in input:gmatch("%S+") do
+        table.insert(parts, part)
+    end
+    
+    if #parts == 0 then return false end
+    
+    local cmdName = parts[1]:lower()
+    table.remove(parts, 1)
+    
+    for _, command in ipairs(commands) do
+        if command.name == cmdName then
+            pcall(command.func, parts)
+            return true
+        end
+    end
+    return false
+end
+
+-- ============================================
+-- GUI SYSTEM
+-- ============================================
+local guiOpen = false
+local guiElements = {}
+local searchQuery = ""
+local scrollOffset = 0
+local searchFocused = false
+local isDraggingScrollbar = false
+
+local searchBarPos = nil
+local searchBarSize = nil
+local scrollbarPos = nil
+local scrollbarSize = nil
+
+local function clearGUI()
+    for _, element in ipairs(guiElements) do
+        pcall(function()
+            element:Remove()
+        end)
+    end
+    guiElements = {}
+end
+
+local function getFilteredCommands()
+    local filteredCommands = {}
+    for _, cmd in ipairs(commands) do
+        local query = searchQuery:lower()
+        if query == "" or 
+           cmd.name:lower():find(query) or 
+           cmd.description:lower():find(query) or
+           cmd.category:lower():find(query) then
+            table.insert(filteredCommands, cmd)
+        end
+    end
+    return filteredCommands
+end
+
+local function createGUI()
+    clearGUI()
+    
+    local screenSize = workspace.CurrentCamera.ViewportSize
+    
+    local mainFrame = Drawing.new("Square")
+    mainFrame.Visible = true
+    mainFrame.Size = Vector2.new(700, 500)
+    mainFrame.Position = Vector2.new(screenSize.X / 2 - 350, screenSize.Y / 2 - 250)
+    mainFrame.Color = Color3.fromRGB(25, 25, 25)
+    mainFrame.Filled = true
+    mainFrame.Opacity = 0.95
+    mainFrame.Rounding = 10
+    table.insert(guiElements, mainFrame)
+    
+    local title = Drawing.new("Text")
+    title.Visible = true
+    title.Text = "Command Panel"
+    title.Size = 24
+    title.Position = mainFrame.Position + Vector2.new(20, 15)
+    title.Color = Color3.fromRGB(100, 200, 255)
+    title.Outline = true
+    title.Center = false
+    table.insert(guiElements, title)
+    
+    local searchBg = Drawing.new("Square")
+    searchBg.Visible = true
+    searchBg.Size = Vector2.new(660, 35)
+    searchBg.Position = mainFrame.Position + Vector2.new(20, 55)
+    searchBg.Color = searchFocused and Color3.fromRGB(50, 50, 50) or Color3.fromRGB(35, 35, 35)
+    searchBg.Filled = true
+    searchBg.Rounding = 6
+    table.insert(guiElements, searchBg)
+    searchBarPos = searchBg.Position
+    searchBarSize = searchBg.Size
+    
+    if searchFocused then
+        local searchBorder = Drawing.new("Square")
+        searchBorder.Visible = true
+        searchBorder.Size = Vector2.new(660, 35)
+        searchBorder.Position = mainFrame.Position + Vector2.new(20, 55)
+        searchBorder.Color = Color3.fromRGB(100, 200, 255)
+        searchBorder.Filled = false
+        searchBorder.Rounding = 6
+        searchBorder.Thickness = 2
+        table.insert(guiElements, searchBorder)
+    end
+    
+    local displayText = ""
+    if searchQuery ~= "" then
+        displayText = searchQuery
+    elseif searchFocused then
+        displayText = "|"
+    else
+        displayText = "Click to search..."
+    end
+    
+    local searchText = Drawing.new("Text")
+    searchText.Visible = true
+    searchText.Text = displayText
+    searchText.Size = 18
+    searchText.Position = searchBg.Position + Vector2.new(15, 10)
+    searchText.Color = (searchQuery ~= "" or searchFocused) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 150, 150)
+    searchText.Outline = true
+    searchText.Center = false
+    table.insert(guiElements, searchText)
+    
+    local filteredCommands = getFilteredCommands()
+    
+    local scrollbarBg = Drawing.new("Square")
+    scrollbarBg.Visible = true
+    scrollbarBg.Size = Vector2.new(12, 380)
+    scrollbarBg.Position = mainFrame.Position + Vector2.new(675, 105)
+    scrollbarBg.Color = Color3.fromRGB(35, 35, 35)
+    scrollbarBg.Filled = true
+    scrollbarBg.Rounding = 6
+    table.insert(guiElements, scrollbarBg)
+    scrollbarPos = scrollbarBg.Position
+    scrollbarSize = scrollbarBg.Size
+    
+    local maxCommands = 6
+    local totalCommands = #filteredCommands
+    
+    if totalCommands > maxCommands then
+        local handleHeight = math.max(40, (maxCommands / totalCommands) * 380)
+        local maxScroll = totalCommands - maxCommands
+        local handleY = (scrollOffset / maxScroll) * (380 - handleHeight)
+        
+        local scrollHandle = Drawing.new("Square")
+        scrollHandle.Visible = true
+        scrollHandle.Size = Vector2.new(12, handleHeight)
+        scrollHandle.Position = scrollbarBg.Position + Vector2.new(0, handleY)
+        scrollHandle.Color = isDraggingScrollbar and Color3.fromRGB(150, 220, 255) or Color3.fromRGB(100, 200, 255)
+        scrollHandle.Filled = true
+        scrollHandle.Rounding = 6
+        table.insert(guiElements, scrollHandle)
+    end
+    
+    local yOffset = 105
+    local startIndex = scrollOffset + 1
+    local endIndex = math.min(startIndex + maxCommands - 1, #filteredCommands)
+    
+    for i = startIndex, endIndex do
+        local cmd = filteredCommands[i]
+        
+        local cmdBg = Drawing.new("Square")
+        cmdBg.Visible = true
+        cmdBg.Size = Vector2.new(645, 55)
+        cmdBg.Position = mainFrame.Position + Vector2.new(20, yOffset)
+        cmdBg.Color = Color3.fromRGB(40, 40, 40)
+        cmdBg.Filled = true
+        cmdBg.Rounding = 6
+        table.insert(guiElements, cmdBg)
+        
+        local categoryTag = Drawing.new("Square")
+        categoryTag.Visible = true
+        categoryTag.Size = Vector2.new(80, 20)
+        categoryTag.Position = cmdBg.Position + Vector2.new(15, 8)
+        categoryTag.Color = Color3.fromRGB(60, 120, 200)
+        categoryTag.Filled = true
+        categoryTag.Rounding = 3
+        table.insert(guiElements, categoryTag)
+        
+        local categoryText = Drawing.new("Text")
+        categoryText.Visible = true
+        categoryText.Text = cmd.category
+        categoryText.Size = 12
+        categoryText.Position = categoryTag.Position + Vector2.new(5, 4)
+        categoryText.Color = Color3.fromRGB(255, 255, 255)
+        categoryText.Outline = true
+        categoryText.Center = false
+        table.insert(guiElements, categoryText)
+        
+        local cmdName = Drawing.new("Text")
+        cmdName.Visible = true
+        cmdName.Text = cmd.usage
+        cmdName.Size = 18
+        cmdName.Position = cmdBg.Position + Vector2.new(110, 8)
+        cmdName.Color = Color3.fromRGB(100, 200, 255)
+        cmdName.Outline = true
+        cmdName.Center = false
+        table.insert(guiElements, cmdName)
+        
+        local cmdDesc = Drawing.new("Text")
+        cmdDesc.Visible = true
+        cmdDesc.Text = cmd.description
+        cmdDesc.Size = 14
+        cmdDesc.Position = cmdBg.Position + Vector2.new(15, 33)
+        cmdDesc.Color = Color3.fromRGB(180, 180, 180)
+        cmdDesc.Outline = true
+        cmdDesc.Center = false
+        table.insert(guiElements, cmdDesc)
+        
+        yOffset = yOffset + 65
+    end
+    
+    local resultsText = Drawing.new("Text")
+    resultsText.Visible = true
+    resultsText.Text = string.format("Showing %d-%d of %d commands", math.min(startIndex, totalCommands), endIndex, totalCommands)
+    resultsText.Size = 14
+    resultsText.Position = mainFrame.Position + Vector2.new(20, 470)
+    resultsText.Color = Color3.fromRGB(150, 150, 150)
+    resultsText.Outline = true
+    resultsText.Center = false
+    table.insert(guiElements, resultsText)
+    
+    local closeHint = Drawing.new("Text")
+    closeHint.Visible = true
+    closeHint.Text = "ESC to close"
+    closeHint.Size = 14
+    closeHint.Position = mainFrame.Position + Vector2.new(610, 470)
+    closeHint.Color = Color3.fromRGB(150, 150, 150)
+    closeHint.Outline = true
+    closeHint.Center = false
+    table.insert(guiElements, closeHint)
+end
+
+function toggleGUI()
+    guiOpen = not guiOpen
+    
+    if guiOpen then
+        searchQuery = ""
+        scrollOffset = 0
+        searchFocused = false
+        createGUI()
+    else
+        clearGUI()
+        searchFocused = false
+    end
+end
+
+-- ============================================
+-- COMMAND BAR
+-- ============================================
+local commandBarVisible = false
+local commandBarElements = {}
+local commandInput = ""
+
+local function createCommandBar()
+    for _, element in ipairs(commandBarElements) do
+        pcall(function()
+            element:Remove()
+        end)
+    end
+    commandBarElements = {}
+    
+    local screenSize = workspace.CurrentCamera.ViewportSize
+    
+    local bg = Drawing.new("Square")
+    bg.Visible = true
+    bg.Size = Vector2.new(600, 50)
+    bg.Position = Vector2.new(screenSize.X / 2 - 300, screenSize.Y - 150)
+    bg.Color = Color3.fromRGB(20, 20, 20)
+    bg.Filled = true
+    bg.Opacity = 0.95
+    bg.Rounding = 8
+    table.insert(commandBarElements, bg)
+    
+    local inputText = Drawing.new("Text")
+    inputText.Visible = true
+    inputText.Text = commandInput
+    inputText.Size = 20
+    inputText.Position = bg.Position + Vector2.new(15, 15)
+    inputText.Color = Color3.fromRGB(255, 255, 255)
+    inputText.Outline = true
+    inputText.Center = false
+    table.insert(commandBarElements, inputText)
+    
+    local cursor = Drawing.new("Text")
+    cursor.Visible = true
+    cursor.Text = "|"
+    cursor.Size = 20
+    cursor.Position = inputText.Position + Vector2.new(#commandInput * 10, 0)
+    cursor.Color = Color3.fromRGB(255, 255, 255)
+    cursor.Outline = true
+    cursor.Center = false
+    table.insert(commandBarElements, cursor)
+end
+
+local function hideCommandBar()
+    for _, element in ipairs(commandBarElements) do
+        pcall(function()
+            element:Remove()
+        end)
+    end
+    commandBarElements = {}
+    commandBarVisible = false
+    commandInput = ""
+end
+
+-- ============================================
+-- INPUT HANDLER
+-- ============================================
+local lastPressedKeys = {}
+local lastMouseState = false
+
+local keyMap = {
+    ["A"] = "a", ["B"] = "b", ["C"] = "c", ["D"] = "d", ["E"] = "e",
+    ["F"] = "f", ["G"] = "g", ["H"] = "h", ["I"] = "i", ["J"] = "j",
+    ["K"] = "k", ["L"] = "l", ["M"] = "m", ["N"] = "n", ["O"] = "o",
+    ["P"] = "p", ["Q"] = "q", ["R"] = "r", ["S"] = "s", ["T"] = "t",
+    ["U"] = "u", ["V"] = "v", ["W"] = "w", ["X"] = "x", ["Y"] = "y",
+    ["Z"] = "z",
+    ["0"] = "0", ["1"] = "1", ["2"] = "2", ["3"] = "3", ["4"] = "4",
+    ["5"] = "5", ["6"] = "6", ["7"] = "7", ["8"] = "8", ["9"] = "9",
+    ["Semicolon"] = ";",
+    ["OEM_1"] = ";",
+    ["OemSemicolon"] = ";",
+    ["Space"] = " ",
+}
+
+local function isBackspace(key)
+    return key == "BackSpace" or 
+           key == "Backspace" or 
+           key == "Back" or 
+           key == "BACKSPACE" or
+           key:lower():find("back")
+end
+
+local function isEnter(key)
+    return key == "Return" or 
+           key == "Enter" or 
+           key == "RETURN" or
+           key == "ENTER"
+end
+
+local function isEscape(key)
+    return key == "Escape" or 
+           key == "ESC" or
+           key == "ESCAPE" or
+           key:lower():find("esc")
+end
+
+local function isPointInRect(point, rectPos, rectSize)
+    return point.X >= rectPos.X and 
+           point.X <= rectPos.X + rectSize.X and 
+           point.Y >= rectPos.Y and 
+           point.Y <= rectPos.Y + rectSize.Y
+end
+
+RunService.Render:Connect(function()
+    local pressedKeys = getpressedkeys()
+    local mousePos = Vector2.new(0, 0)
+    
+    pcall(function()
+        local UserInputService = game:GetService("UserInputService")
+        mousePos = UserInputService:GetMouseLocation()
+    end)
+    
+    local mouseDown = isleftpressed()
+    local mouseClicked = mouseDown and not lastMouseState
+    
+    if guiOpen then
+        if mouseClicked and searchBarPos and searchBarSize then
+            if isPointInRect(mousePos, searchBarPos, searchBarSize) then
+                searchFocused = true
+                createGUI()
+            else
+                if searchFocused then
+                    searchFocused = false
+                    createGUI()
+                end
+            end
+        end
+        
+        if scrollbarPos and scrollbarSize then
+            if mouseDown and isPointInRect(mousePos, scrollbarPos, scrollbarSize) then
+                isDraggingScrollbar = true
+            end
+            
+            if not mouseDown then
+                isDraggingScrollbar = false
+            end
+            
+            if isDraggingScrollbar then
+                local filteredCommands = getFilteredCommands()
+                local maxCommands = 6
+                local totalCommands = #filteredCommands
+                
+                if totalCommands > maxCommands then
+                    local maxScroll = totalCommands - maxCommands
+                    local relativeY = mousePos.Y - scrollbarPos.Y
+                    local scrollPercent = math.clamp(relativeY / scrollbarSize.Y, 0, 1)
+                    scrollOffset = math.floor(scrollPercent * maxScroll)
+                    createGUI()
+                end
+            end
+        end
+    end
+    
+    lastMouseState = mouseDown
+    
+    for _, key in ipairs(pressedKeys) do
+        local wasPressed = false
+        for _, lastKey in ipairs(lastPressedKeys) do
+            if lastKey == key then
+                wasPressed = true
+                break
+            end
+        end
+        
+        if not wasPressed then
+            local mappedKey = keyMap[key]
+            
+            if isEscape(key) then
+                if searchFocused then
+                    searchFocused = false
+                    createGUI()
+                elseif guiOpen then
+                    toggleGUI()
+                end
+                if commandBarVisible then
+                    hideCommandBar()
+                end
+                
+            elseif isEnter(key) then
+                if commandBarVisible then
+                    executeCommand(commandInput)
+                    hideCommandBar()
+                elseif searchFocused then
+                    searchFocused = false
+                    createGUI()
+                end
+                
+            elseif (mappedKey == ";" or key == "Semicolon" or key == "OEM_1" or key == "OemSemicolon") and not commandBarVisible and not searchFocused then
+                commandBarVisible = true
+                commandInput = ";"
+                createCommandBar()
+                
+            elseif isBackspace(key) then
+                if commandBarVisible then
+                    if #commandInput > 1 then
+                        commandInput = commandInput:sub(1, -2)
+                        createCommandBar()
+                    else
+                        hideCommandBar()
+                    end
+                elseif searchFocused and guiOpen then
+                    if #searchQuery > 0 then
+                        searchQuery = searchQuery:sub(1, -2)
+                        scrollOffset = 0
+                        createGUI()
+                    end
+                end
+                
+            elseif mappedKey then
+                if commandBarVisible and mappedKey ~= ";" then
+                    commandInput = commandInput .. mappedKey
+                    createCommandBar()
+                elseif searchFocused and guiOpen and mappedKey ~= ";" then
+                    searchQuery = searchQuery .. mappedKey
+                    scrollOffset = 0
+                    createGUI()
+                end
+            end
+        end
+    end
+    
+    lastPressedKeys = pressedKeys
+end)
