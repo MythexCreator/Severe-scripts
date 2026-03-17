@@ -3,8 +3,64 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
+
+-- ============================================
+-- TELEPORT SYSTEM
+-- ============================================
+local teleportTarget = nil
+local teleportFrames = 0
+local TELEPORT_HOLD_FRAMES = 10
+
+local function findPlayer(playerName)
+    playerName = playerName:lower()
+    
+    for _, player in ipairs(Players:GetChildren()) do
+        if player:IsA("Player") and player.Name:lower() == playerName then
+            return player
+        end
+    end
+    
+    for _, player in ipairs(Players:GetChildren()) do
+        if player:IsA("Player") and player.DisplayName:lower() == playerName then
+            return player
+        end
+    end
+    
+    for _, player in ipairs(Players:GetChildren()) do
+        if player:IsA("Player") and player.Name:lower():find(playerName) then
+            return player
+        end
+    end
+    
+    for _, player in ipairs(Players:GetChildren()) do
+        if player:IsA("Player") and player.DisplayName:lower():find(playerName) then
+            return player
+        end
+    end
+    
+    return nil
+end
+
+local function teleportToPlayer(playerName)
+    local character = LocalPlayer.Character
+    if not character then return end
+    
+    local targetPlayer = findPlayer(playerName)
+    if not targetPlayer then return end
+    
+    local targetChar = targetPlayer.Character
+    if not targetChar then return end
+    
+    local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return end
+    
+    local targetPos = targetRoot.Position
+    teleportTarget = Vector3.new(targetPos.X, targetPos.Y + 3, targetPos.Z)
+    teleportFrames = TELEPORT_HOLD_FRAMES
+end
 
 -- ============================================
 -- NOCLIP SYSTEM
@@ -34,72 +90,62 @@ local function disableNoclip()
         noclipConnection:Disconnect()
         noclipConnection = nil
     end
-    
-    local character = LocalPlayer.Character
-    if character then
-        for _, part in pairs(character:GetDescendants()) do
-            if part:IsA("BasePart") then
-                part.CanCollide = true
-            end
-        end
-    end
-    
     noclipEnabled = false
 end
 
 -- ============================================
--- COMMAND SYSTEM
+-- INFINITE JUMP SYSTEM
 -- ============================================
-local commands = {
-    {
-        name = "noclip",
-        description = "Walk through walls",
-        usage = ";noclip",
-        category = "Movement",
-        func = function(args)
-            enableNoclip()
-        end
-    },
-    {
-        name = "unnoclip",
-        description = "Disable noclip",
-        usage = ";unnoclip",
-        category = "Movement",
-        func = function(args)
-            disableNoclip()
-        end
-    },
-    {
-        name = "cmds",
-        description = "Opens command panel",
-        usage = ";cmds",
-        category = "Utility",
-        func = function(args)
-            toggleGUI()
-        end
-    },
-}
+local infJumpEnabled = false
+local infJumpConnection = nil
+local lastSpaceState = false
 
-local function executeCommand(input)
-    input = input:gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
+local function enableInfJump()
+    if infJumpConnection then return end
     
-    local parts = {}
-    for part in input:gmatch("%S+") do
-        table.insert(parts, part)
-    end
-    
-    if #parts == 0 then return false end
-    
-    local cmdName = parts[1]:lower()
-    table.remove(parts, 1)
-    
-    for _, command in ipairs(commands) do
-        if command.name == cmdName then
-            pcall(command.func, parts)
-            return true
+    infJumpConnection = RunService.Render:Connect(function()
+        local character = LocalPlayer.Character
+        if not character then return end
+        
+        local rootPart = character:FindFirstChild("HumanoidRootPart")
+        if not rootPart then return end
+        
+        local spacePressed = false
+        pcall(function()
+            local keys = getpressedkeys()
+            for _, key in ipairs(keys) do
+                if key:lower() == "space" then
+                    spacePressed = true
+                    break
+                end
+            end
+        end)
+        
+        if spacePressed and not lastSpaceState then
+            rootPart.Velocity = Vector3.new(rootPart.Velocity.X, 60, rootPart.Velocity.Z)
         end
+        
+        lastSpaceState = spacePressed
+    end)
+    
+    infJumpEnabled = true
+end
+
+local function disableInfJump()
+    if infJumpConnection then
+        infJumpConnection:Disconnect()
+        infJumpConnection = nil
     end
-    return false
+    infJumpEnabled = false
+    lastSpaceState = false
+end
+
+-- ============================================
+-- GOTO SYSTEM
+-- ============================================
+local function gotoPosition(x, y, z)
+    teleportTarget = Vector3.new(x, y, z)
+    teleportFrames = TELEPORT_HOLD_FRAMES
 end
 
 -- ============================================
@@ -110,39 +156,64 @@ local guiElements = {}
 local searchQuery = ""
 local scrollOffset = 0
 local searchFocused = false
-local isDraggingScrollbar = false
-
-local searchBarPos = nil
-local searchBarSize = nil
-local scrollbarPos = nil
-local scrollbarSize = nil
+local searchBarPos, searchBarSize = nil, nil
 
 local function clearGUI()
     for _, element in ipairs(guiElements) do
-        pcall(function()
-            element:Remove()
-        end)
+        pcall(function() element:Remove() end)
     end
     guiElements = {}
 end
 
-local function getFilteredCommands()
-    local filteredCommands = {}
+local function toggleGUI() end
+
+-- ============================================
+-- COMMANDS
+-- ============================================
+local commands = {
+    { name = "noclip", description = "Walk through walls", usage = ";noclip", category = "Movement", func = function() enableNoclip() end },
+    { name = "unnoclip", description = "Disable noclip", usage = ";unnoclip", category = "Movement", func = function() disableNoclip() end },
+    { name = "infjump", description = "Enable infinite jump", usage = ";infjump", category = "Movement", func = function() enableInfJump() end },
+    { name = "uninfjump", description = "Disable infinite jump", usage = ";uninfjump", category = "Movement", func = function() disableInfJump() end },
+    { name = "tp", description = "Teleport to player", usage = ";tp [player]", category = "Teleport", func = function(args) if args[1] then teleportToPlayer(args[1]) end end },
+    { name = "goto", description = "Teleport to coords", usage = ";goto [x] [y] [z]", category = "Teleport", func = function(args) gotoPosition(tonumber(args[1]) or 0, tonumber(args[2]) or 100, tonumber(args[3]) or 0) end },
+    { name = "cmds", description = "Open command panel", usage = ";cmds", category = "Utility", func = function() toggleGUI() end },
+}
+
+local function executeCommand(input)
+    input = input:gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local parts = {}
+    for part in input:gmatch("%S+") do table.insert(parts, part) end
+    if #parts == 0 then return false end
+    
+    local cmdName = parts[1]:lower()
+    table.remove(parts, 1)
+    
     for _, cmd in ipairs(commands) do
-        local query = searchQuery:lower()
-        if query == "" or 
-           cmd.name:lower():find(query) or 
-           cmd.description:lower():find(query) or
-           cmd.category:lower():find(query) then
-            table.insert(filteredCommands, cmd)
+        if cmd.name == cmdName then
+            cmd.func(parts)
+            return true
         end
     end
-    return filteredCommands
+    return false
+end
+
+-- ============================================
+-- GUI FUNCTIONS
+-- ============================================
+local function getFilteredCommands()
+    local filtered = {}
+    local query = searchQuery:lower()
+    for _, cmd in ipairs(commands) do
+        if query == "" or cmd.name:lower():find(query) or cmd.description:lower():find(query) then
+            table.insert(filtered, cmd)
+        end
+    end
+    return filtered
 end
 
 local function createGUI()
     clearGUI()
-    
     local screenSize = workspace.CurrentCamera.ViewportSize
     
     local mainFrame = Drawing.new("Square")
@@ -162,7 +233,6 @@ local function createGUI()
     title.Position = mainFrame.Position + Vector2.new(20, 15)
     title.Color = Color3.fromRGB(100, 200, 255)
     title.Outline = true
-    title.Center = false
     table.insert(guiElements, title)
     
     local searchBg = Drawing.new("Square")
@@ -176,27 +246,7 @@ local function createGUI()
     searchBarPos = searchBg.Position
     searchBarSize = searchBg.Size
     
-    if searchFocused then
-        local searchBorder = Drawing.new("Square")
-        searchBorder.Visible = true
-        searchBorder.Size = Vector2.new(660, 35)
-        searchBorder.Position = mainFrame.Position + Vector2.new(20, 55)
-        searchBorder.Color = Color3.fromRGB(100, 200, 255)
-        searchBorder.Filled = false
-        searchBorder.Rounding = 6
-        searchBorder.Thickness = 2
-        table.insert(guiElements, searchBorder)
-    end
-    
-    local displayText = ""
-    if searchQuery ~= "" then
-        displayText = searchQuery
-    elseif searchFocused then
-        displayText = "|"
-    else
-        displayText = "Click to search..."
-    end
-    
+    local displayText = searchQuery ~= "" and searchQuery or (searchFocused and "|" or "Click to search...")
     local searchText = Drawing.new("Text")
     searchText.Visible = true
     searchText.Text = displayText
@@ -204,46 +254,15 @@ local function createGUI()
     searchText.Position = searchBg.Position + Vector2.new(15, 10)
     searchText.Color = (searchQuery ~= "" or searchFocused) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 150, 150)
     searchText.Outline = true
-    searchText.Center = false
     table.insert(guiElements, searchText)
     
-    local filteredCommands = getFilteredCommands()
-    
-    local scrollbarBg = Drawing.new("Square")
-    scrollbarBg.Visible = true
-    scrollbarBg.Size = Vector2.new(12, 380)
-    scrollbarBg.Position = mainFrame.Position + Vector2.new(675, 105)
-    scrollbarBg.Color = Color3.fromRGB(35, 35, 35)
-    scrollbarBg.Filled = true
-    scrollbarBg.Rounding = 6
-    table.insert(guiElements, scrollbarBg)
-    scrollbarPos = scrollbarBg.Position
-    scrollbarSize = scrollbarBg.Size
-    
-    local maxCommands = 6
-    local totalCommands = #filteredCommands
-    
-    if totalCommands > maxCommands then
-        local handleHeight = math.max(40, (maxCommands / totalCommands) * 380)
-        local maxScroll = totalCommands - maxCommands
-        local handleY = (scrollOffset / maxScroll) * (380 - handleHeight)
-        
-        local scrollHandle = Drawing.new("Square")
-        scrollHandle.Visible = true
-        scrollHandle.Size = Vector2.new(12, handleHeight)
-        scrollHandle.Position = scrollbarBg.Position + Vector2.new(0, handleY)
-        scrollHandle.Color = isDraggingScrollbar and Color3.fromRGB(150, 220, 255) or Color3.fromRGB(100, 200, 255)
-        scrollHandle.Filled = true
-        scrollHandle.Rounding = 6
-        table.insert(guiElements, scrollHandle)
-    end
-    
+    local filtered = getFilteredCommands()
     local yOffset = 105
-    local startIndex = scrollOffset + 1
-    local endIndex = math.min(startIndex + maxCommands - 1, #filteredCommands)
+    local startIdx = scrollOffset + 1
+    local endIdx = math.min(startIdx + 5, #filtered)
     
-    for i = startIndex, endIndex do
-        local cmd = filteredCommands[i]
+    for i = startIdx, endIdx do
+        local cmd = filtered[i]
         
         local cmdBg = Drawing.new("Square")
         cmdBg.Visible = true
@@ -254,24 +273,27 @@ local function createGUI()
         cmdBg.Rounding = 6
         table.insert(guiElements, cmdBg)
         
-        local categoryTag = Drawing.new("Square")
-        categoryTag.Visible = true
-        categoryTag.Size = Vector2.new(80, 20)
-        categoryTag.Position = cmdBg.Position + Vector2.new(15, 8)
-        categoryTag.Color = Color3.fromRGB(60, 120, 200)
-        categoryTag.Filled = true
-        categoryTag.Rounding = 3
-        table.insert(guiElements, categoryTag)
+        local catColor = cmd.category == "Movement" and Color3.fromRGB(80, 180, 80) or
+                         cmd.category == "Teleport" and Color3.fromRGB(80, 180, 180) or
+                         Color3.fromRGB(120, 120, 120)
         
-        local categoryText = Drawing.new("Text")
-        categoryText.Visible = true
-        categoryText.Text = cmd.category
-        categoryText.Size = 12
-        categoryText.Position = categoryTag.Position + Vector2.new(5, 4)
-        categoryText.Color = Color3.fromRGB(255, 255, 255)
-        categoryText.Outline = true
-        categoryText.Center = false
-        table.insert(guiElements, categoryText)
+        local catTag = Drawing.new("Square")
+        catTag.Visible = true
+        catTag.Size = Vector2.new(80, 20)
+        catTag.Position = cmdBg.Position + Vector2.new(15, 8)
+        catTag.Color = catColor
+        catTag.Filled = true
+        catTag.Rounding = 3
+        table.insert(guiElements, catTag)
+        
+        local catText = Drawing.new("Text")
+        catText.Visible = true
+        catText.Text = cmd.category
+        catText.Size = 12
+        catText.Position = catTag.Position + Vector2.new(5, 4)
+        catText.Color = Color3.fromRGB(255, 255, 255)
+        catText.Outline = true
+        table.insert(guiElements, catText)
         
         local cmdName = Drawing.new("Text")
         cmdName.Visible = true
@@ -280,7 +302,6 @@ local function createGUI()
         cmdName.Position = cmdBg.Position + Vector2.new(110, 8)
         cmdName.Color = Color3.fromRGB(100, 200, 255)
         cmdName.Outline = true
-        cmdName.Center = false
         table.insert(guiElements, cmdName)
         
         local cmdDesc = Drawing.new("Text")
@@ -290,21 +311,10 @@ local function createGUI()
         cmdDesc.Position = cmdBg.Position + Vector2.new(15, 33)
         cmdDesc.Color = Color3.fromRGB(180, 180, 180)
         cmdDesc.Outline = true
-        cmdDesc.Center = false
         table.insert(guiElements, cmdDesc)
         
         yOffset = yOffset + 65
     end
-    
-    local resultsText = Drawing.new("Text")
-    resultsText.Visible = true
-    resultsText.Text = string.format("Showing %d-%d of %d commands", math.min(startIndex, totalCommands), endIndex, totalCommands)
-    resultsText.Size = 14
-    resultsText.Position = mainFrame.Position + Vector2.new(20, 470)
-    resultsText.Color = Color3.fromRGB(150, 150, 150)
-    resultsText.Outline = true
-    resultsText.Center = false
-    table.insert(guiElements, resultsText)
     
     local closeHint = Drawing.new("Text")
     closeHint.Visible = true
@@ -313,13 +323,11 @@ local function createGUI()
     closeHint.Position = mainFrame.Position + Vector2.new(610, 470)
     closeHint.Color = Color3.fromRGB(150, 150, 150)
     closeHint.Outline = true
-    closeHint.Center = false
     table.insert(guiElements, closeHint)
 end
 
 function toggleGUI()
     guiOpen = not guiOpen
-    
     if guiOpen then
         searchQuery = ""
         scrollOffset = 0
@@ -327,7 +335,6 @@ function toggleGUI()
         createGUI()
     else
         clearGUI()
-        searchFocused = false
     end
 end
 
@@ -337,220 +344,231 @@ end
 local commandBarVisible = false
 local commandBarElements = {}
 local commandInput = ""
+local autocompleteResults = {}
+local selectedAutocomplete = 0
+
+local function getAutocompleteResults(input)
+    local results = {}
+    local clean = input:gsub("^;", ""):lower()
+    if clean == "" or clean:find(" ") then return results end
+    
+    for _, cmd in ipairs(commands) do
+        if cmd.name:lower():find(clean, 1, true) == 1 then
+            table.insert(results, cmd)
+        end
+    end
+    
+    local limited = {}
+    for i = 1, math.min(#results, 5) do
+        table.insert(limited, results[i])
+    end
+    return limited
+end
 
 local function createCommandBar()
-    for _, element in ipairs(commandBarElements) do
-        pcall(function()
-            element:Remove()
-        end)
-    end
+    for _, el in ipairs(commandBarElements) do pcall(function() el:Remove() end) end
     commandBarElements = {}
     
     local screenSize = workspace.CurrentCamera.ViewportSize
+    autocompleteResults = getAutocompleteResults(commandInput)
+    local acHeight = #autocompleteResults * 35
     
     local bg = Drawing.new("Square")
     bg.Visible = true
     bg.Size = Vector2.new(600, 50)
-    bg.Position = Vector2.new(screenSize.X / 2 - 300, screenSize.Y - 150)
+    bg.Position = Vector2.new(screenSize.X / 2 - 300, screenSize.Y - 150 - acHeight)
     bg.Color = Color3.fromRGB(20, 20, 20)
     bg.Filled = true
     bg.Opacity = 0.95
     bg.Rounding = 8
     table.insert(commandBarElements, bg)
     
+    local border = Drawing.new("Square")
+    border.Visible = true
+    border.Size = Vector2.new(600, 50)
+    border.Position = bg.Position
+    border.Color = Color3.fromRGB(100, 200, 255)
+    border.Filled = false
+    border.Rounding = 8
+    border.Thickness = 2
+    table.insert(commandBarElements, border)
+    
     local inputText = Drawing.new("Text")
     inputText.Visible = true
-    inputText.Text = commandInput
+    inputText.Text = commandInput .. ((os.clock() % 1) > 0.5 and "|" or "")
     inputText.Size = 20
     inputText.Position = bg.Position + Vector2.new(15, 15)
     inputText.Color = Color3.fromRGB(255, 255, 255)
     inputText.Outline = true
-    inputText.Center = false
     table.insert(commandBarElements, inputText)
     
-    local cursor = Drawing.new("Text")
-    cursor.Visible = true
-    cursor.Text = "|"
-    cursor.Size = 20
-    cursor.Position = inputText.Position + Vector2.new(#commandInput * 10, 0)
-    cursor.Color = Color3.fromRGB(255, 255, 255)
-    cursor.Outline = true
-    cursor.Center = false
-    table.insert(commandBarElements, cursor)
+    if #autocompleteResults > 0 then
+        local dropBg = Drawing.new("Square")
+        dropBg.Visible = true
+        dropBg.Size = Vector2.new(600, acHeight)
+        dropBg.Position = bg.Position + Vector2.new(0, 50)
+        dropBg.Color = Color3.fromRGB(30, 30, 30)
+        dropBg.Filled = true
+        dropBg.Rounding = 8
+        table.insert(commandBarElements, dropBg)
+        
+        for i, cmd in ipairs(autocompleteResults) do
+            local yPos = bg.Position.Y + 50 + (i - 1) * 35
+            local isSelected = (i == selectedAutocomplete)
+            
+            if isSelected then
+                local hl = Drawing.new("Square")
+                hl.Visible = true
+                hl.Size = Vector2.new(596, 33)
+                hl.Position = Vector2.new(bg.Position.X + 2, yPos + 1)
+                hl.Color = Color3.fromRGB(60, 120, 200)
+                hl.Filled = true
+                hl.Rounding = 4
+                table.insert(commandBarElements, hl)
+            end
+            
+            local cmdText = Drawing.new("Text")
+            cmdText.Visible = true
+            cmdText.Text = ";" .. cmd.name .. " - " .. cmd.description
+            cmdText.Size = 14
+            cmdText.Position = Vector2.new(bg.Position.X + 15, yPos + 10)
+            cmdText.Color = isSelected and Color3.fromRGB(150, 220, 255) or Color3.fromRGB(100, 200, 255)
+            cmdText.Outline = true
+            table.insert(commandBarElements, cmdText)
+        end
+    end
 end
 
 local function hideCommandBar()
-    for _, element in ipairs(commandBarElements) do
-        pcall(function()
-            element:Remove()
-        end)
-    end
+    for _, el in ipairs(commandBarElements) do pcall(function() el:Remove() end) end
     commandBarElements = {}
     commandBarVisible = false
     commandInput = ""
+    selectedAutocomplete = 0
+end
+
+local function applyAutocomplete()
+    local cmd = autocompleteResults[selectedAutocomplete] or autocompleteResults[1]
+    if cmd then
+        commandInput = ";" .. cmd.name .. (cmd.usage:find("%[") and " " or "")
+        selectedAutocomplete = 0
+        createCommandBar()
+    end
 end
 
 -- ============================================
--- INPUT HANDLER
+-- INPUT
 -- ============================================
-local lastPressedKeys = {}
-local lastMouseState = false
+local lastKeys = {}
+local lastMouse = false
 
 local keyMap = {
-    ["A"] = "a", ["B"] = "b", ["C"] = "c", ["D"] = "d", ["E"] = "e",
-    ["F"] = "f", ["G"] = "g", ["H"] = "h", ["I"] = "i", ["J"] = "j",
-    ["K"] = "k", ["L"] = "l", ["M"] = "m", ["N"] = "n", ["O"] = "o",
-    ["P"] = "p", ["Q"] = "q", ["R"] = "r", ["S"] = "s", ["T"] = "t",
-    ["U"] = "u", ["V"] = "v", ["W"] = "w", ["X"] = "x", ["Y"] = "y",
-    ["Z"] = "z",
-    ["0"] = "0", ["1"] = "1", ["2"] = "2", ["3"] = "3", ["4"] = "4",
-    ["5"] = "5", ["6"] = "6", ["7"] = "7", ["8"] = "8", ["9"] = "9",
-    ["Semicolon"] = ";",
-    ["OEM_1"] = ";",
-    ["OemSemicolon"] = ";",
-    ["Space"] = " ",
+    A="a",B="b",C="c",D="d",E="e",F="f",G="g",H="h",I="i",J="j",K="k",L="l",M="m",
+    N="n",O="o",P="p",Q="q",R="r",S="s",T="t",U="u",V="v",W="w",X="x",Y="y",Z="z",
+    ["0"]="0",["1"]="1",["2"]="2",["3"]="3",["4"]="4",["5"]="5",["6"]="6",["7"]="7",["8"]="8",["9"]="9",
+    Semicolon=";",OEM_1=";",Space=" "
 }
 
-local function isBackspace(key)
-    return key == "BackSpace" or 
-           key == "Backspace" or 
-           key == "Back" or 
-           key == "BACKSPACE" or
-           key:lower():find("back")
+local function isKey(key, ...)
+    local k = key:lower()
+    for _, v in ipairs({...}) do if k:find(v) then return true end end
+    return false
 end
 
-local function isEnter(key)
-    return key == "Return" or 
-           key == "Enter" or 
-           key == "RETURN" or
-           key == "ENTER"
-end
-
-local function isEscape(key)
-    return key == "Escape" or 
-           key == "ESC" or
-           key == "ESCAPE" or
-           key:lower():find("esc")
-end
-
-local function isPointInRect(point, rectPos, rectSize)
-    return point.X >= rectPos.X and 
-           point.X <= rectPos.X + rectSize.X and 
-           point.Y >= rectPos.Y and 
-           point.Y <= rectPos.Y + rectSize.Y
+local function inRect(p, pos, size)
+    return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
 end
 
 RunService.Render:Connect(function()
-    local pressedKeys = getpressedkeys()
-    local mousePos = Vector2.new(0, 0)
-    
-    pcall(function()
-        local UserInputService = game:GetService("UserInputService")
-        mousePos = UserInputService:GetMouseLocation()
-    end)
-    
-    local mouseDown = isleftpressed()
-    local mouseClicked = mouseDown and not lastMouseState
-    
-    if guiOpen then
-        if mouseClicked and searchBarPos and searchBarSize then
-            if isPointInRect(mousePos, searchBarPos, searchBarSize) then
-                searchFocused = true
-                createGUI()
-            else
-                if searchFocused then
-                    searchFocused = false
-                    createGUI()
-                end
+    -- Teleport
+    if teleportFrames > 0 and teleportTarget then
+        local char = LocalPlayer.Character
+        if char then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root then
+                root.CFrame = CFrame.new(teleportTarget)
+                root.Velocity = Vector3.new(0, 0, 0)
             end
         end
-        
-        if scrollbarPos and scrollbarSize then
-            if mouseDown and isPointInRect(mousePos, scrollbarPos, scrollbarSize) then
-                isDraggingScrollbar = true
-            end
-            
-            if not mouseDown then
-                isDraggingScrollbar = false
-            end
-            
-            if isDraggingScrollbar then
-                local filteredCommands = getFilteredCommands()
-                local maxCommands = 6
-                local totalCommands = #filteredCommands
-                
-                if totalCommands > maxCommands then
-                    local maxScroll = totalCommands - maxCommands
-                    local relativeY = mousePos.Y - scrollbarPos.Y
-                    local scrollPercent = math.clamp(relativeY / scrollbarSize.Y, 0, 1)
-                    scrollOffset = math.floor(scrollPercent * maxScroll)
-                    createGUI()
-                end
-            end
+        teleportFrames = teleportFrames - 1
+        if teleportFrames == 0 then teleportTarget = nil end
+    end
+    
+    if commandBarVisible then createCommandBar() end
+    
+    local keys = getpressedkeys()
+    local mousePos = Vector2.new(0, 0)
+    pcall(function() mousePos = UserInputService:GetMouseLocation() end)
+    
+    local mouseDown = isleftpressed()
+    local mouseClick = mouseDown and not lastMouse
+    
+    if guiOpen and mouseClick and searchBarPos then
+        if inRect(mousePos, searchBarPos, searchBarSize) then
+            searchFocused = true
+            createGUI()
+        elseif searchFocused then
+            searchFocused = false
+            createGUI()
         end
     end
     
-    lastMouseState = mouseDown
+    lastMouse = mouseDown
     
-    for _, key in ipairs(pressedKeys) do
+    for _, key in ipairs(keys) do
         local wasPressed = false
-        for _, lastKey in ipairs(lastPressedKeys) do
-            if lastKey == key then
-                wasPressed = true
-                break
-            end
-        end
+        for _, lk in ipairs(lastKeys) do if lk == key then wasPressed = true break end end
         
         if not wasPressed then
-            local mappedKey = keyMap[key]
+            local mapped = keyMap[key]
             
-            if isEscape(key) then
-                if searchFocused then
-                    searchFocused = false
-                    createGUI()
-                elseif guiOpen then
-                    toggleGUI()
-                end
-                if commandBarVisible then
-                    hideCommandBar()
+            if isKey(key, "esc") then
+                if searchFocused then searchFocused = false createGUI()
+                elseif guiOpen then toggleGUI() end
+                if commandBarVisible then hideCommandBar() end
+                
+            elseif isKey(key, "return", "enter") then
+                if commandBarVisible then executeCommand(commandInput) hideCommandBar()
+                elseif searchFocused then searchFocused = false createGUI() end
+                
+            elseif isKey(key, "tab") then
+                if commandBarVisible and #autocompleteResults > 0 then applyAutocomplete() end
+                
+            elseif isKey(key, "up") then
+                if commandBarVisible and #autocompleteResults > 0 then
+                    selectedAutocomplete = selectedAutocomplete - 1
+                    if selectedAutocomplete < 1 then selectedAutocomplete = #autocompleteResults end
                 end
                 
-            elseif isEnter(key) then
-                if commandBarVisible then
-                    executeCommand(commandInput)
-                    hideCommandBar()
-                elseif searchFocused then
-                    searchFocused = false
-                    createGUI()
+            elseif isKey(key, "down") then
+                if commandBarVisible and #autocompleteResults > 0 then
+                    selectedAutocomplete = selectedAutocomplete + 1
+                    if selectedAutocomplete > #autocompleteResults then selectedAutocomplete = 1 end
                 end
                 
-            elseif (mappedKey == ";" or key == "Semicolon" or key == "OEM_1" or key == "OemSemicolon") and not commandBarVisible and not searchFocused then
+            elseif (mapped == ";" or key == "Semicolon" or key == "OEM_1") and not commandBarVisible and not searchFocused then
                 commandBarVisible = true
                 commandInput = ";"
+                selectedAutocomplete = 0
                 createCommandBar()
                 
-            elseif isBackspace(key) then
+            elseif isKey(key, "back") then
                 if commandBarVisible then
-                    if #commandInput > 1 then
-                        commandInput = commandInput:sub(1, -2)
-                        createCommandBar()
-                    else
-                        hideCommandBar()
-                    end
-                elseif searchFocused and guiOpen then
-                    if #searchQuery > 0 then
-                        searchQuery = searchQuery:sub(1, -2)
-                        scrollOffset = 0
-                        createGUI()
-                    end
+                    if #commandInput > 1 then commandInput = commandInput:sub(1, -2) createCommandBar()
+                    else hideCommandBar() end
+                elseif searchFocused and #searchQuery > 0 then
+                    searchQuery = searchQuery:sub(1, -2)
+                    scrollOffset = 0
+                    createGUI()
                 end
                 
-            elseif mappedKey then
-                if commandBarVisible and mappedKey ~= ";" then
-                    commandInput = commandInput .. mappedKey
+            elseif mapped and mapped ~= ";" then
+                if commandBarVisible then
+                    commandInput = commandInput .. mapped
+                    selectedAutocomplete = 0
                     createCommandBar()
-                elseif searchFocused and guiOpen and mappedKey ~= ";" then
-                    searchQuery = searchQuery .. mappedKey
+                elseif searchFocused then
+                    searchQuery = searchQuery .. mapped
                     scrollOffset = 0
                     createGUI()
                 end
@@ -558,5 +576,5 @@ RunService.Render:Connect(function()
         end
     end
     
-    lastPressedKeys = pressedKeys
+    lastKeys = keys
 end)
