@@ -141,6 +141,57 @@ local function disableInfJump()
 end
 
 -- ============================================
+-- SPECTATE SYSTEM
+-- ============================================
+local specPlayer = nil
+local specCheckTimer = 0
+
+local function stopSpectate()
+    specPlayer = nil
+    local cam = workspace.CurrentCamera
+    local mChar = LocalPlayer.Character
+    if cam and mChar then
+        local hum = mChar:FindFirstChildOfClass("Humanoid")
+        if hum then
+            cam.CameraSubject = hum
+        end
+    end
+end
+
+local function startSpectate(playerName)
+    local player = findPlayer(playerName)
+    if not player then return end
+    
+    if specPlayer then
+        stopSpectate()
+    end
+    
+    local char = player.Character
+    if not char then return end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    
+    specPlayer = player
+    local cam = workspace.CurrentCamera
+    if cam then
+        cam.CameraSubject = hum
+    end
+end
+
+local function checkSpec()
+    if not specPlayer then return end
+    if not specPlayer.Parent then
+        stopSpectate()
+        return
+    end
+    local char = specPlayer.Character
+    if not char or not char:FindFirstChildOfClass("Humanoid") then
+        stopSpectate()
+    end
+end
+
+-- ============================================
 -- GOTO SYSTEM
 -- ============================================
 local function gotoPosition(x, y, z)
@@ -156,7 +207,9 @@ local guiElements = {}
 local searchQuery = ""
 local scrollOffset = 0
 local searchFocused = false
+local isDraggingScrollbar = false
 local searchBarPos, searchBarSize = nil, nil
+local scrollbarPos, scrollbarSize = nil, nil
 
 local function clearGUI()
     for _, element in ipairs(guiElements) do
@@ -175,6 +228,8 @@ local commands = {
     { name = "unnoclip", description = "Disable noclip", usage = ";unnoclip", category = "Movement", func = function() disableNoclip() end },
     { name = "infjump", description = "Enable infinite jump", usage = ";infjump", category = "Movement", func = function() enableInfJump() end },
     { name = "uninfjump", description = "Disable infinite jump", usage = ";uninfjump", category = "Movement", func = function() disableInfJump() end },
+    { name = "spectate", description = "Spectate a player", usage = ";spectate [player]", category = "Visual", func = function(args) if args[1] then startSpectate(args[1]) end end },
+    { name = "unspectate", description = "Stop spectating", usage = ";unspectate", category = "Visual", func = function() stopSpectate() end },
     { name = "tp", description = "Teleport to player", usage = ";tp [player]", category = "Teleport", func = function(args) if args[1] then teleportToPlayer(args[1]) end end },
     { name = "goto", description = "Teleport to coords", usage = ";goto [x] [y] [z]", category = "Teleport", func = function(args) gotoPosition(tonumber(args[1]) or 0, tonumber(args[2]) or 100, tonumber(args[3]) or 0) end },
     { name = "cmds", description = "Open command panel", usage = ";cmds", category = "Utility", func = function() toggleGUI() end },
@@ -246,6 +301,18 @@ local function createGUI()
     searchBarPos = searchBg.Position
     searchBarSize = searchBg.Size
     
+    if searchFocused then
+        local searchBorder = Drawing.new("Square")
+        searchBorder.Visible = true
+        searchBorder.Size = Vector2.new(660, 35)
+        searchBorder.Position = mainFrame.Position + Vector2.new(20, 55)
+        searchBorder.Color = Color3.fromRGB(100, 200, 255)
+        searchBorder.Filled = false
+        searchBorder.Rounding = 6
+        searchBorder.Thickness = 2
+        table.insert(guiElements, searchBorder)
+    end
+    
     local displayText = searchQuery ~= "" and searchQuery or (searchFocused and "|" or "Click to search...")
     local searchText = Drawing.new("Text")
     searchText.Visible = true
@@ -257,9 +324,40 @@ local function createGUI()
     table.insert(guiElements, searchText)
     
     local filtered = getFilteredCommands()
+    local maxCommands = 6
+    local totalCommands = #filtered
+    
+    -- Scrollbar background
+    local scrollbarBg = Drawing.new("Square")
+    scrollbarBg.Visible = true
+    scrollbarBg.Size = Vector2.new(12, 380)
+    scrollbarBg.Position = mainFrame.Position + Vector2.new(675, 105)
+    scrollbarBg.Color = Color3.fromRGB(35, 35, 35)
+    scrollbarBg.Filled = true
+    scrollbarBg.Rounding = 6
+    table.insert(guiElements, scrollbarBg)
+    scrollbarPos = scrollbarBg.Position
+    scrollbarSize = scrollbarBg.Size
+    
+    -- Scrollbar handle
+    if totalCommands > maxCommands then
+        local handleHeight = math.max(40, (maxCommands / totalCommands) * 380)
+        local maxScroll = totalCommands - maxCommands
+        local handleY = (scrollOffset / maxScroll) * (380 - handleHeight)
+        
+        local scrollHandle = Drawing.new("Square")
+        scrollHandle.Visible = true
+        scrollHandle.Size = Vector2.new(12, handleHeight)
+        scrollHandle.Position = scrollbarBg.Position + Vector2.new(0, handleY)
+        scrollHandle.Color = isDraggingScrollbar and Color3.fromRGB(150, 220, 255) or Color3.fromRGB(100, 200, 255)
+        scrollHandle.Filled = true
+        scrollHandle.Rounding = 6
+        table.insert(guiElements, scrollHandle)
+    end
+    
     local yOffset = 105
     local startIdx = scrollOffset + 1
-    local endIdx = math.min(startIdx + 5, #filtered)
+    local endIdx = math.min(startIdx + maxCommands - 1, totalCommands)
     
     for i = startIdx, endIdx do
         local cmd = filtered[i]
@@ -274,6 +372,7 @@ local function createGUI()
         table.insert(guiElements, cmdBg)
         
         local catColor = cmd.category == "Movement" and Color3.fromRGB(80, 180, 80) or
+                         cmd.category == "Visual" and Color3.fromRGB(180, 80, 180) or
                          cmd.category == "Teleport" and Color3.fromRGB(80, 180, 180) or
                          Color3.fromRGB(120, 120, 120)
         
@@ -332,6 +431,7 @@ function toggleGUI()
         searchQuery = ""
         scrollOffset = 0
         searchFocused = false
+        isDraggingScrollbar = false
         createGUI()
     else
         clearGUI()
@@ -479,7 +579,7 @@ local function inRect(p, pos, size)
     return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
 end
 
-RunService.Render:Connect(function()
+RunService.Render:Connect(function(dt)
     -- Teleport
     if teleportFrames > 0 and teleportTarget then
         local char = LocalPlayer.Character
@@ -494,6 +594,13 @@ RunService.Render:Connect(function()
         if teleportFrames == 0 then teleportTarget = nil end
     end
     
+    -- Spectate check
+    specCheckTimer = specCheckTimer + dt
+    if specCheckTimer >= 0.5 then
+        specCheckTimer = 0
+        checkSpec()
+    end
+    
     if commandBarVisible then createCommandBar() end
     
     local keys = getpressedkeys()
@@ -503,13 +610,42 @@ RunService.Render:Connect(function()
     local mouseDown = isleftpressed()
     local mouseClick = mouseDown and not lastMouse
     
-    if guiOpen and mouseClick and searchBarPos then
-        if inRect(mousePos, searchBarPos, searchBarSize) then
-            searchFocused = true
-            createGUI()
-        elseif searchFocused then
-            searchFocused = false
-            createGUI()
+    -- GUI interactions
+    if guiOpen then
+        -- Search bar click
+        if mouseClick and searchBarPos then
+            if inRect(mousePos, searchBarPos, searchBarSize) then
+                searchFocused = true
+                createGUI()
+            elseif searchFocused then
+                searchFocused = false
+                createGUI()
+            end
+        end
+        
+        -- Scrollbar dragging
+        if scrollbarPos and scrollbarSize then
+            if mouseDown and inRect(mousePos, scrollbarPos, scrollbarSize) then
+                isDraggingScrollbar = true
+            end
+            
+            if not mouseDown then
+                isDraggingScrollbar = false
+            end
+            
+            if isDraggingScrollbar then
+                local filtered = getFilteredCommands()
+                local maxCommands = 6
+                local totalCommands = #filtered
+                
+                if totalCommands > maxCommands then
+                    local maxScroll = totalCommands - maxCommands
+                    local relativeY = mousePos.Y - scrollbarPos.Y
+                    local scrollPercent = math.clamp(relativeY / scrollbarSize.Y, 0, 1)
+                    scrollOffset = math.floor(scrollPercent * maxScroll)
+                    createGUI()
+                end
+            end
         end
     end
     
