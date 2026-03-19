@@ -1,5 +1,7 @@
--- Admin Panel for Severe
--- Press ; to open command bar
+-- ╔══════════════════════════════════════════════════════════════════╗
+-- ║                    SEVERE ADMIN PANEL v2.0                       ║
+-- ║                     Press ; to open commands                     ║
+-- ╚══════════════════════════════════════════════════════════════════╝
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -8,556 +10,1389 @@ local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
 -- ============================================
--- TELEPORT SYSTEM
+-- THEME
 -- ============================================
-local teleportTarget = nil
-local teleportFrames = 0
-local TELEPORT_HOLD_FRAMES = 10
+local Theme = {
+    Primary = Color3.fromRGB(10, 10, 14),
+    Secondary = Color3.fromRGB(18, 18, 24),
+    Tertiary = Color3.fromRGB(28, 28, 36),
+    Card = Color3.fromRGB(22, 22, 30),
+    
+    Accent = Color3.fromRGB(99, 102, 241),
+    AccentLight = Color3.fromRGB(139, 142, 255),
+    
+    TextPrimary = Color3.fromRGB(250, 250, 255),
+    TextSecondary = Color3.fromRGB(160, 160, 180),
+    TextMuted = Color3.fromRGB(100, 100, 120),
+    
+    Movement = Color3.fromRGB(34, 197, 94),
+    Visual = Color3.fromRGB(168, 85, 247),
+    Teleport = Color3.fromRGB(59, 130, 246),
+    Utility = Color3.fromRGB(249, 115, 22),
+    Fun = Color3.fromRGB(236, 72, 153),
+    
+    Success = Color3.fromRGB(34, 197, 94),
+    Warning = Color3.fromRGB(245, 158, 11),
+    Error = Color3.fromRGB(239, 68, 68),
+}
 
-local function findPlayer(playerName)
-    playerName = playerName:lower()
-    
-    for _, player in ipairs(Players:GetChildren()) do
-        if player:IsA("Player") and player.Name:lower() == playerName then
-            return player
+-- ============================================
+-- KEY REPEAT SETTINGS
+-- ============================================
+local KEY_INITIAL_DELAY = 0.4
+local KEY_REPEAT_RATE = 0.033
+local heldKeys = {}
+
+-- ============================================
+-- NOTIFICATION
+-- ============================================
+local function notify(msg)
+    pcall(function()
+        send_notification(tostring(msg))
+    end)
+end
+
+-- ============================================
+-- UTILITY
+-- ============================================
+local function inRect(p, pos, size)
+    return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
+end
+
+local function getDistance(pos1, pos2)
+    if not pos1 or not pos2 then return 0 end
+    local dx = (pos1.X or pos1.x or 0) - (pos2.X or pos2.x or 0)
+    local dy = (pos1.Y or pos1.y or 0) - (pos2.Y or pos2.y or 0)
+    local dz = (pos1.Z or pos1.z or 0) - (pos2.Z or pos2.z or 0)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- ============================================
+-- INTRO
+-- ============================================
+local introElements = {}
+local introComplete = false
+local introStartTime = nil
+
+local function createIntro()
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if not cam then 
+            introComplete = true
+            return 
         end
+        
+        local cx = math.floor(cam.ViewportSize.X / 2)
+        local cy = math.floor(cam.ViewportSize.Y / 2)
+        
+        local bg = Drawing.new("Square")
+        bg.Visible = true
+        bg.Filled = true
+        bg.Color = Theme.Primary
+        bg.Rounding = 16
+        bg.Opacity = 0
+        bg.Position = Vector2.new(cx - 140, cy - 95)
+        bg.Size = Vector2.new(280, 190)
+        table.insert(introElements, bg)
+        
+        local border = Drawing.new("Square")
+        border.Visible = true
+        border.Filled = false
+        border.Color = Theme.Accent
+        border.Rounding = 16
+        border.Thickness = 2
+        border.Opacity = 0
+        border.Position = Vector2.new(cx - 140, cy - 95)
+        border.Size = Vector2.new(280, 190)
+        table.insert(introElements, border)
+        
+        local logoRing = Drawing.new("Circle")
+        logoRing.Visible = true
+        logoRing.Filled = false
+        logoRing.Color = Theme.Accent
+        logoRing.NumSides = 32
+        logoRing.Thickness = 4
+        logoRing.Opacity = 0
+        logoRing.Position = Vector2.new(cx, cy - 30)
+        logoRing.Radius = 32
+        table.insert(introElements, logoRing)
+        
+        local letter = Drawing.new("Text")
+        letter.Visible = true
+        letter.Text = "S"
+        letter.Size = 36
+        letter.Color = Theme.Accent
+        letter.Outline = true
+        letter.Opacity = 0
+        letter.Center = true
+        letter.Position = Vector2.new(cx, cy - 30 - 18)
+        table.insert(introElements, letter)
+        
+        local title = Drawing.new("Text")
+        title.Visible = true
+        title.Text = "SEVERE"
+        title.Size = 28
+        title.Color = Theme.TextPrimary
+        title.Outline = true
+        title.Opacity = 0
+        title.Center = true
+        title.Position = Vector2.new(cx, cy + 30 - 14)
+        table.insert(introElements, title)
+        
+        local sub = Drawing.new("Text")
+        sub.Visible = true
+        sub.Text = "Admin Panel v2.0"
+        sub.Size = 13
+        sub.Color = Theme.TextSecondary
+        sub.Outline = true
+        sub.Opacity = 0
+        sub.Center = true
+        sub.Position = Vector2.new(cx, cy + 60 - 6)
+        table.insert(introElements, sub)
+        
+        introStartTime = os.clock()
+    end)
+end
+
+local function updateIntro()
+    if introComplete then return end
+    if not introStartTime then return end
+    if #introElements == 0 then 
+        introComplete = true
+        return
     end
     
-    for _, player in ipairs(Players:GetChildren()) do
-        if player:IsA("Player") and player.DisplayName:lower() == playerName then
-            return player
-        end
-    end
+    local elapsed = os.clock() - introStartTime
     
-    for _, player in ipairs(Players:GetChildren()) do
-        if player:IsA("Player") and player.Name:lower():find(playerName) then
-            return player
+    if elapsed < 0.4 then
+        local alpha = elapsed / 0.4
+        for _, el in ipairs(introElements) do
+            pcall(function() el.Opacity = alpha end)
         end
+    elseif elapsed < 2.2 then
+        for _, el in ipairs(introElements) do
+            pcall(function() el.Opacity = 1 end)
+        end
+    elseif elapsed < 2.6 then
+        local alpha = 1 - ((elapsed - 2.2) / 0.4)
+        for _, el in ipairs(introElements) do
+            pcall(function() el.Opacity = alpha end)
+        end
+    else
+        for _, el in ipairs(introElements) do
+            pcall(function() 
+                el.Visible = false
+                el:Remove() 
+            end)
+        end
+        introElements = {}
+        introComplete = true
+        notify("Severe Admin loaded! Press ;")
     end
+end
+
+task.spawn(function()
+    task.wait(0.2)
+    createIntro()
+end)
+
+-- ============================================
+-- FIND PLAYER
+-- ============================================
+local function findPlayer(name)
+    if not name or name == "" then return nil end
+    name = name:lower()
     
-    for _, player in ipairs(Players:GetChildren()) do
-        if player:IsA("Player") and player.DisplayName:lower():find(playerName) then
-            return player
-        end
+    for _, p in ipairs(Players:GetChildren()) do
+        if p:IsA("Player") and p.Name:lower() == name then return p end
+    end
+    for _, p in ipairs(Players:GetChildren()) do
+        if p:IsA("Player") and p.DisplayName:lower() == name then return p end
+    end
+    for _, p in ipairs(Players:GetChildren()) do
+        if p:IsA("Player") and p.Name:lower():sub(1, #name) == name then return p end
+    end
+    for _, p in ipairs(Players:GetChildren()) do
+        if p:IsA("Player") and p.DisplayName:lower():sub(1, #name) == name then return p end
+    end
+    for _, p in ipairs(Players:GetChildren()) do
+        if p:IsA("Player") and p.Name:lower():find(name, 1, true) then return p end
+    end
+    for _, p in ipairs(Players:GetChildren()) do
+        if p:IsA("Player") and p.DisplayName:lower():find(name, 1, true) then return p end
     end
     
     return nil
 end
 
-local function teleportToPlayer(playerName)
-    local character = LocalPlayer.Character
-    if not character then return end
-    
-    local targetPlayer = findPlayer(playerName)
-    if not targetPlayer then return end
-    
-    local targetChar = targetPlayer.Character
-    if not targetChar then return end
-    
-    local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
-    if not targetRoot then return end
-    
-    local targetPos = targetRoot.Position
-    teleportTarget = Vector3.new(targetPos.X, targetPos.Y + 3, targetPos.Z)
-    teleportFrames = TELEPORT_HOLD_FRAMES
+-- ============================================
+-- FIND SPAWN LOCATION
+-- ============================================
+local function findSpawnLocation()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj.ClassName == "SpawnLocation" then
+            return obj.Position + Vector3.new(0, 3, 0)
+        end
+    end
+    return Vector3.new(0, 50, 0)
 end
 
 -- ============================================
--- NOCLIP SYSTEM
+-- TELEPORT
 -- ============================================
-local noclipEnabled = false
-local noclipConnection = nil
+local teleportTarget = nil
+local teleportFrames = 0
 
-local function enableNoclip()
-    if noclipConnection then return end
+local function tpToPlayer(name)
+    local char = LocalPlayer.Character
+    if not char then notify("No character") return end
     
-    noclipConnection = RunService.Render:Connect(function()
-        local character = LocalPlayer.Character
-        if not character then return end
-        
-        for _, part in pairs(character:GetDescendants()) do
-            if part:IsA("BasePart") and part.CanCollide then
-                part.CanCollide = false
-            end
-        end
+    local target = findPlayer(name)
+    if not target then notify("Player not found: " .. name) return end
+    
+    local tChar = target.Character
+    if not tChar then notify("Target has no character") return end
+    
+    local root = tChar:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    local pos = root.Position
+    teleportTarget = Vector3.new(pos.X, pos.Y + 3, pos.Z)
+    teleportFrames = 10
+    notify("Teleporting to " .. target.Name)
+end
+
+local function gotoPos(x, y, z)
+    teleportTarget = Vector3.new(x, y, z)
+    teleportFrames = 10
+    notify("Teleporting to " .. x .. ", " .. y .. ", " .. z)
+end
+
+-- ============================================
+-- SPAWNPOINT (COMPLETELY REWRITTEN FOR PRISON LIFE ETC)
+-- ============================================
+local spawnPointEnabled = false
+local spawnPointPosition = nil
+local spawnPointCFrame = nil
+
+-- Tracking variables
+local sp_lastCharacter = nil
+local sp_lastCharacterName = nil
+local sp_lastRootPart = nil
+local sp_lastHealth = 100
+local sp_lastMaxHealth = 100
+local sp_wasAlive = true
+local sp_lastPosition = nil
+local sp_teleportCooldown = 0
+local sp_justTeleported = false
+local sp_framesSinceRespawn = 0
+
+local function setSpawnpoint()
+    local char = LocalPlayer.Character
+    if not char then notify("No character") return end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then notify("No HumanoidRootPart") return end
+    
+    -- Save full CFrame (position + rotation)
+    spawnPointCFrame = root.CFrame
+    spawnPointPosition = root.Position + Vector3.new(0, 0.5, 0)
+    spawnPointEnabled = true
+    
+    -- Initialize tracking
+    sp_lastCharacter = char
+    sp_lastCharacterName = char.Name
+    sp_lastRootPart = root
+    sp_lastPosition = root.Position
+    sp_teleportCooldown = 0
+    sp_justTeleported = false
+    sp_framesSinceRespawn = 999
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        sp_lastHealth = hum.Health
+        sp_lastMaxHealth = hum.MaxHealth
+        sp_wasAlive = hum.Health > 0
+    end
+    
+    notify("Spawnpoint set!")
+end
+
+local function clearSpawnpoint()
+    spawnPointEnabled = false
+    spawnPointPosition = nil
+    spawnPointCFrame = nil
+    sp_lastCharacter = nil
+    sp_lastCharacterName = nil
+    sp_lastRootPart = nil
+    sp_lastHealth = 100
+    sp_lastMaxHealth = 100
+    sp_wasAlive = true
+    sp_lastPosition = nil
+    sp_teleportCooldown = 0
+    sp_justTeleported = false
+    notify("Spawnpoint cleared")
+end
+
+local function doSpawnpointTeleport()
+    if not spawnPointPosition then return false end
+    
+    local char = LocalPlayer.Character
+    if not char then return false end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    
+    -- Add small random offset to avoid detection
+    local randX = (math.random() - 0.5) * 2
+    local randZ = (math.random() - 0.5) * 2
+    local offset = Vector3.new(randX, 0, randZ)
+    
+    pcall(function()
+        root.CFrame = CFrame.new(spawnPointPosition + offset)
+        root.Velocity = Vector3.new(0, 0, 0)
     end)
     
-    noclipEnabled = true
-end
-
-local function disableNoclip()
-    if noclipConnection then
-        noclipConnection:Disconnect()
-        noclipConnection = nil
-    end
-    noclipEnabled = false
-end
-
--- ============================================
--- INFINITE JUMP SYSTEM
--- ============================================
-local infJumpEnabled = false
-local infJumpConnection = nil
-local lastSpaceState = false
-
-local function enableInfJump()
-    if infJumpConnection then return end
+    sp_justTeleported = true
+    sp_teleportCooldown = 1.5 -- Cooldown to prevent spam
+    sp_lastPosition = spawnPointPosition + offset
     
-    infJumpConnection = RunService.Render:Connect(function()
-        local character = LocalPlayer.Character
-        if not character then return end
+    return true
+end
+
+local function checkSpawnpoint()
+    if not spawnPointEnabled or not spawnPointPosition then return end
+    
+    -- Handle cooldown
+    if sp_teleportCooldown > 0 then
+        sp_teleportCooldown = sp_teleportCooldown - 0.016
+        return
+    end
+    
+    local char = LocalPlayer.Character
+    
+    -- No character = dead or loading
+    if not char then
+        sp_wasAlive = false
+        sp_lastCharacter = nil
+        return
+    end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then
+        sp_wasAlive = false
+        return
+    end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    local currentHealth = 100
+    local currentMaxHealth = 100
+    
+    if hum then
+        currentHealth = hum.Health or 0
+        currentMaxHealth = hum.MaxHealth or 100
+    end
+    
+    local isAlive = currentHealth > 0
+    local currentPosition = root.Position
+    
+    -- ============================================
+    -- RESPAWN DETECTION (Multiple methods)
+    -- ============================================
+    local shouldTeleport = false
+    local reason = ""
+    
+    -- Method 1: Character instance changed
+    if char ~= sp_lastCharacter and sp_lastCharacter ~= nil then
+        shouldTeleport = true
+        reason = "Character changed"
+    end
+    
+    -- Method 2: Character name changed (Prison Life respawn)
+    if char.Name ~= sp_lastCharacterName and sp_lastCharacterName ~= nil then
+        shouldTeleport = true
+        reason = "Character name changed"
+    end
+    
+    -- Method 3: RootPart instance changed
+    if root ~= sp_lastRootPart and sp_lastRootPart ~= nil then
+        shouldTeleport = true
+        reason = "RootPart changed"
+    end
+    
+    -- Method 4: Was dead, now alive
+    if not sp_wasAlive and isAlive then
+        shouldTeleport = true
+        reason = "Respawned from death"
+    end
+    
+    -- Method 5: Health went from 0 to full (or near full)
+    if sp_lastHealth <= 0 and currentHealth >= currentMaxHealth * 0.9 then
+        shouldTeleport = true
+        reason = "Health reset"
+    end
+    
+    -- Method 6: Sudden large position change (possible respawn teleport)
+    if sp_lastPosition and not sp_justTeleported then
+        local distance = getDistance(currentPosition, sp_lastPosition)
+        -- If moved more than 100 studs instantly and health is full = respawn
+        if distance > 100 and currentHealth >= currentMaxHealth * 0.8 then
+            shouldTeleport = true
+            reason = "Large teleport detected"
+        end
+    end
+    
+    -- Method 7: MaxHealth changed significantly (some games change this on respawn)
+    if sp_lastMaxHealth > 0 and currentMaxHealth ~= sp_lastMaxHealth then
+        if currentHealth >= currentMaxHealth * 0.9 then
+            shouldTeleport = true
+            reason = "MaxHealth changed"
+        end
+    end
+    
+    -- ============================================
+    -- EXECUTE TELEPORT
+    -- ============================================
+    if shouldTeleport then
+        -- Wait a few frames for character to fully load
+        sp_framesSinceRespawn = 0
+    end
+    
+    -- Teleport after short delay (30 frames = ~0.5 seconds)
+    if sp_framesSinceRespawn < 60 then
+        sp_framesSinceRespawn = sp_framesSinceRespawn + 1
         
-        local rootPart = character:FindFirstChild("HumanoidRootPart")
-        if not rootPart then return end
-        
-        local spacePressed = false
+        -- Try to teleport multiple times during this window
+        if sp_framesSinceRespawn == 15 or sp_framesSinceRespawn == 30 or sp_framesSinceRespawn == 45 then
+            if doSpawnpointTeleport() then
+                notify("Respawn → Spawnpoint")
+            end
+        end
+    end
+    
+    -- ============================================
+    -- UPDATE TRACKING
+    -- ============================================
+    sp_lastCharacter = char
+    sp_lastCharacterName = char.Name
+    sp_lastRootPart = root
+    sp_lastHealth = currentHealth
+    sp_lastMaxHealth = currentMaxHealth
+    sp_wasAlive = isAlive
+    
+    -- Update position (but not if we just teleported)
+    if not sp_justTeleported then
+        sp_lastPosition = currentPosition
+    end
+    sp_justTeleported = false
+end
+
+-- ============================================
+-- SPAWN
+-- ============================================
+local function goToSpawn()
+    local char = LocalPlayer.Character
+    if not char then notify("No character") return end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    
+    local spawnPos = findSpawnLocation()
+    teleportTarget = spawnPos
+    teleportFrames = 10
+    notify("Teleporting to spawn")
+end
+
+-- ============================================
+-- NOCLIP
+-- ============================================
+local noclipConn = nil
+
+local function noclipOn()
+    if noclipConn then return end
+    noclipConn = RunService.Render:Connect(function()
         pcall(function()
-            local keys = getpressedkeys()
-            for _, key in ipairs(keys) do
-                if key:lower() == "space" then
-                    spacePressed = true
-                    break
+            local char = LocalPlayer.Character
+            if not char then return end
+            for _, p in pairs(char:GetDescendants()) do
+                if p:IsA("BasePart") and p.CanCollide then
+                    p.CanCollide = false
                 end
             end
         end)
-        
-        if spacePressed and not lastSpaceState then
-            rootPart.Velocity = Vector3.new(rootPart.Velocity.X, 60, rootPart.Velocity.Z)
-        end
-        
-        lastSpaceState = spacePressed
+    end)
+    notify("Noclip enabled")
+end
+
+local function noclipOff()
+    if noclipConn then
+        noclipConn:Disconnect()
+        noclipConn = nil
+    end
+    notify("Noclip disabled")
+end
+
+-- ============================================
+-- INFINITE JUMP
+-- ============================================
+local infJumpConn = nil
+local lastSpaceInf = false
+
+local function infJumpOn()
+    if infJumpConn then return end
+    infJumpConn = RunService.Render:Connect(function()
+        pcall(function()
+            local char = LocalPlayer.Character
+            if not char then return end
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if not root then return end
+            
+            local space = false
+            for _, k in ipairs(getpressedkeys()) do
+                if k:lower():find("space") then space = true break end
+            end
+            
+            if space and not lastSpaceInf then
+                local vel = root.Velocity
+                root.Velocity = Vector3.new(vel.X, 60, vel.Z)
+            end
+            lastSpaceInf = space
+        end)
+    end)
+    notify("Infinite Jump enabled")
+end
+
+local function infJumpOff()
+    if infJumpConn then
+        infJumpConn:Disconnect()
+        infJumpConn = nil
+    end
+    lastSpaceInf = false
+    notify("Infinite Jump disabled")
+end
+
+-- ============================================
+-- FOV
+-- ============================================
+local defaultFov = 70
+local fovConn = nil
+local currentFovValue = nil
+
+local function setFov(value)
+    local num = tonumber(value)
+    if not num then 
+        notify("Invalid FOV value") 
+        return 
+    end
+    num = math.clamp(num, 1, 120)
+    currentFovValue = num
+    
+    -- Kill old loop
+    if fovConn then fovConn:Disconnect() fovConn = nil end
+    
+    -- Continuously write FOV so game can't reset it
+    fovConn = RunService.Render:Connect(function()
+        if not currentFovValue then return end
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            if cam then
+                memory.writef32(cam, 0x160, currentFovValue)
+            end
+        end)
     end)
     
-    infJumpEnabled = true
+    notify("FOV set to " .. num)
 end
 
-local function disableInfJump()
-    if infJumpConnection then
-        infJumpConnection:Disconnect()
-        infJumpConnection = nil
+local function resetFov()
+    currentFovValue = nil
+    
+    if fovConn then
+        fovConn:Disconnect()
+        fovConn = nil
     end
-    infJumpEnabled = false
-    lastSpaceState = false
+    
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then
+            memory.writef32(cam, 0x160, defaultFov)
+        end
+    end)
+    
+    notify("FOV reset to " .. defaultFov)
 end
 
 -- ============================================
--- SPECTATE SYSTEM
+-- ANTI AFK (IMPROVED WITH ANTI-DETECTION)
+-- ============================================
+local antiAfkEnabled = false
+local antiAfkThread = nil
+
+local ANTI_AFK_MIN_INTERVAL = 45
+local ANTI_AFK_MAX_INTERVAL = 90
+
+local antiAfkActions = {
+    { name = "Jump", weight = 30, fn = function()
+        keypress(0x20) task.wait(0.05 + math.random() * 0.15) keyrelease(0x20)
+    end },
+    { name = "Forward", weight = 25, fn = function()
+        keypress(0x57) task.wait(0.1 + math.random() * 0.3) keyrelease(0x57)
+    end },
+    { name = "Backward", weight = 15, fn = function()
+        keypress(0x53) task.wait(0.1 + math.random() * 0.2) keyrelease(0x53)
+    end },
+    { name = "Left", weight = 10, fn = function()
+        keypress(0x41) task.wait(0.08 + math.random() * 0.15) keyrelease(0x41)
+    end },
+    { name = "Right", weight = 10, fn = function()
+        keypress(0x44) task.wait(0.08 + math.random() * 0.15) keyrelease(0x44)
+    end },
+    { name = "Look", weight = 20, fn = function()
+        local dx = math.random(-80, 80)
+        local dy = math.random(-40, 40)
+        for i = 1, math.random(3, 6) do
+            mousemoverel(dx / 5, dy / 5)
+            task.wait(0.02 + math.random() * 0.03)
+        end
+    end },
+}
+
+local function selectRandomAction()
+    local total = 0
+    for _, a in ipairs(antiAfkActions) do total = total + a.weight end
+    local r = math.random() * total
+    local c = 0
+    for _, a in ipairs(antiAfkActions) do
+        c = c + a.weight
+        if r <= c then return a end
+    end
+    return antiAfkActions[1]
+end
+
+local function antiAfkLoop()
+    while antiAfkEnabled do
+        local interval = math.random(ANTI_AFK_MIN_INTERVAL, ANTI_AFK_MAX_INTERVAL)
+        interval = interval + (math.random() - 0.5) * interval * 0.2
+        task.wait(interval)
+        if not antiAfkEnabled then break end
+        pcall(function() selectRandomAction().fn() end)
+        task.wait(0.1 + math.random() * 0.3)
+    end
+end
+
+local function antiAfkOn()
+    if antiAfkEnabled then return end
+    antiAfkEnabled = true
+    antiAfkThread = task.spawn(antiAfkLoop)
+    notify("Anti-AFK enabled")
+end
+
+local function antiAfkOff()
+    antiAfkEnabled = false
+    antiAfkThread = nil
+    notify("Anti-AFK disabled")
+end
+
+-- ============================================
+-- VIEW (SPECTATE)
 -- ============================================
 local specPlayer = nil
-local specCheckTimer = 0
+local specTimer = 0
 
-local function stopSpectate()
+local function specOff()
     specPlayer = nil
-    local cam = workspace.CurrentCamera
-    local mChar = LocalPlayer.Character
-    if cam and mChar then
-        local hum = mChar:FindFirstChildOfClass("Humanoid")
-        if hum then
-            cam.CameraSubject = hum
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        local char = LocalPlayer.Character
+        if cam and char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum then cam.CameraSubject = hum end
         end
-    end
+    end)
+    notify("Stopped viewing")
 end
 
-local function startSpectate(playerName)
-    local player = findPlayer(playerName)
-    if not player then return end
-    
-    if specPlayer then
-        stopSpectate()
-    end
+local function specOn(name)
+    local player = findPlayer(name)
+    if not player then notify("Player not found: " .. name) return end
+    if player == LocalPlayer then notify("Cannot view yourself") return end
     
     local char = player.Character
-    if not char then return end
+    if not char then notify("Target has no character") return end
     
     local hum = char:FindFirstChildOfClass("Humanoid")
-    if not hum then return end
+    if not hum then notify("Target has no humanoid") return end
     
     specPlayer = player
-    local cam = workspace.CurrentCamera
-    if cam then
-        cam.CameraSubject = hum
-    end
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam then cam.CameraSubject = hum end
+    end)
+    notify("Viewing " .. player.Name)
 end
 
 local function checkSpec()
     if not specPlayer then return end
-    if not specPlayer.Parent then
-        stopSpectate()
-        return
-    end
+    if not specPlayer.Parent then specOff() return end
     local char = specPlayer.Character
-    if not char or not char:FindFirstChildOfClass("Humanoid") then
-        stopSpectate()
+    if not char or not char:FindFirstChildOfClass("Humanoid") then specOff() end
+end
+
+-- ============================================
+-- ANTI VOID (Teleports to spawn)
+-- ============================================
+local antiVoidConn = nil
+local antiVoidEnabled = false
+local voidThreshold = -150
+local antiVoidCooldown = 0
+
+local function antiVoidOn()
+    if antiVoidConn then return end
+    antiVoidEnabled = true
+    antiVoidCooldown = 0
+    
+    antiVoidConn = RunService.Render:Connect(function()
+        if not antiVoidEnabled then return end
+        
+        if antiVoidCooldown > 0 then
+            antiVoidCooldown = antiVoidCooldown - 0.016
+            return
+        end
+        
+        pcall(function()
+            local char = LocalPlayer.Character
+            if not char then return end
+            
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if not root then return end
+            
+            if root.Position.Y < voidThreshold then
+                local spawnPos = findSpawnLocation()
+                root.CFrame = CFrame.new(spawnPos)
+                root.Velocity = Vector3.new(0, 0, 0)
+                antiVoidCooldown = 2
+                notify("Anti-void: Teleported to spawn!")
+            end
+        end)
+    end)
+    
+    notify("Anti-void enabled")
+end
+
+local function antiVoidOff()
+    antiVoidEnabled = false
+    if antiVoidConn then
+        antiVoidConn:Disconnect()
+        antiVoidConn = nil
     end
+    notify("Anti-void disabled")
 end
 
 -- ============================================
--- GOTO SYSTEM
--- ============================================
-local function gotoPosition(x, y, z)
-    teleportTarget = Vector3.new(x, y, z)
-    teleportFrames = TELEPORT_HOLD_FRAMES
-end
-
--- ============================================
--- GUI SYSTEM
+-- GUI VARIABLES
 -- ============================================
 local guiOpen = false
 local guiElements = {}
 local searchQuery = ""
-local scrollOffset = 0
 local searchFocused = false
-local isDraggingScrollbar = false
-local searchBarPos, searchBarSize = nil, nil
-local scrollbarPos, scrollbarSize = nil, nil
+local scrollOffset = 0
+local targetScroll = 0
+
+local guiDragging = false
+local guiDragOffset = Vector2.new(0, 0)
+local guiPosX = nil
+local guiPosY = nil
+
+local scrollDragging = false
+local scrollDragStartY = 0
+local scrollDragStartOff = 0
+
+local W = 680
+local H = 500
+local HEADER = 52
+local ITEM_H = 58
+local VISIBLE = 6
+local PAD = 14
+local SEARCH_H = 38
+local FOOTER_H = 32
+
+local headerBounds = { pos = Vector2.new(0, 0), size = Vector2.new(0, 0) }
+local searchBounds = { pos = Vector2.new(0, 0), size = Vector2.new(0, 0) }
+local scrollBounds = { pos = Vector2.new(0, 0), size = Vector2.new(0, 0) }
 
 local function clearGUI()
-    for _, element in ipairs(guiElements) do
-        pcall(function() element:Remove() end)
+    for _, el in ipairs(guiElements) do
+        pcall(function() el:Remove() end)
     end
     guiElements = {}
 end
 
-local function toggleGUI() end
+local function catColor(cat)
+    if cat == "Movement" then return Theme.Movement
+    elseif cat == "Visual" then return Theme.Visual
+    elseif cat == "Teleport" then return Theme.Teleport
+    elseif cat == "Utility" then return Theme.Utility
+    elseif cat == "Fun" then return Theme.Fun
+    else return Theme.TextMuted end
+end
 
 -- ============================================
 -- COMMANDS
 -- ============================================
 local commands = {
-    { name = "noclip", description = "Walk through walls", usage = ";noclip", category = "Movement", func = function() enableNoclip() end },
-    { name = "unnoclip", description = "Disable noclip", usage = ";unnoclip", category = "Movement", func = function() disableNoclip() end },
-    { name = "infjump", description = "Enable infinite jump", usage = ";infjump", category = "Movement", func = function() enableInfJump() end },
-    { name = "uninfjump", description = "Disable infinite jump", usage = ";uninfjump", category = "Movement", func = function() disableInfJump() end },
-    { name = "spectate", description = "Spectate a player", usage = ";spectate [player]", category = "Visual", func = function(args) if args[1] then startSpectate(args[1]) end end },
-    { name = "unspectate", description = "Stop spectating", usage = ";unspectate", category = "Visual", func = function() stopSpectate() end },
-    { name = "tp", description = "Teleport to player", usage = ";tp [player]", category = "Teleport", func = function(args) if args[1] then teleportToPlayer(args[1]) end end },
-    { name = "goto", description = "Teleport to coords", usage = ";goto [x] [y] [z]", category = "Teleport", func = function(args) gotoPosition(tonumber(args[1]) or 0, tonumber(args[2]) or 100, tonumber(args[3]) or 0) end },
-    { name = "cmds", description = "Open command panel", usage = ";cmds", category = "Utility", func = function() toggleGUI() end },
+    -- MOVEMENT
+    { name = "noclip", desc = "Walk through walls", usage = ";noclip", cat = "Movement", fn = function() noclipOn() end },
+    { name = "unnoclip", desc = "Disable noclip", usage = ";unnoclip", cat = "Movement", fn = function() noclipOff() end },
+    { name = "infjump", desc = "Jump infinitely", usage = ";infjump", cat = "Movement", fn = function() infJumpOn() end },
+    { name = "uninfjump", desc = "Disable infinite jump", usage = ";uninfjump", cat = "Movement", fn = function() infJumpOff() end },
+    
+    -- VISUAL
+    { name = "view", desc = "Watch a player", usage = ";view [name]", cat = "Visual", fn = function(a) if a[1] then specOn(a[1]) end end },
+    { name = "unview", desc = "Stop viewing", usage = ";unview", cat = "Visual", fn = function() specOff() end },
+    { name = "fov", desc = "Set camera FOV", usage = ";fov [num]", cat = "Visual", fn = function(a) if a[1] then setFov(a[1]) else resetFov() end end },
+    
+    -- TELEPORT
+    { name = "tp", desc = "Teleport to player", usage = ";tp [name]", cat = "Teleport", fn = function(a) if a[1] then tpToPlayer(a[1]) end end },
+    { name = "goto", desc = "Teleport to coords", usage = ";goto [x] [y] [z]", cat = "Teleport", fn = function(a) gotoPos(tonumber(a[1]) or 0, tonumber(a[2]) or 100, tonumber(a[3]) or 0) end },
+    { name = "spawn", desc = "Go to game spawn", usage = ";spawn", cat = "Teleport", fn = function() goToSpawn() end },
+    { name = "spawnpoint", desc = "Set respawn position", usage = ";spawnpoint", cat = "Teleport", fn = function() setSpawnpoint() end },
+    { name = "unspawnpoint", desc = "Clear respawn position", usage = ";unspawnpoint", cat = "Teleport", fn = function() clearSpawnpoint() end },
+    
+    -- UTILITY
+    { name = "antiafk", desc = "Prevent AFK kick", usage = ";antiafk", cat = "Utility", fn = function() antiAfkOn() end },
+    { name = "unantiafk", desc = "Disable anti-AFK", usage = ";unantiafk", cat = "Utility", fn = function() antiAfkOff() end },
+    { name = "antivoid", desc = "Teleport to spawn when falling", usage = ";antivoid", cat = "Utility", fn = function() antiVoidOn() end },
+    { name = "unantivoid", desc = "Disable anti-void", usage = ";unantivoid", cat = "Utility", fn = function() antiVoidOff() end },
+    { name = "cmds", desc = "Open command panel", usage = ";cmds", cat = "Utility", fn = function() end },
 }
 
-local function executeCommand(input)
+local function getFiltered()
+    local r = {}
+    local q = searchQuery:lower()
+    for _, c in ipairs(commands) do
+        if q == "" or c.name:lower():find(q, 1, true) or c.desc:lower():find(q, 1, true) then
+            table.insert(r, c)
+        end
+    end
+    return r
+end
+
+local function maxScroll()
+    return math.max(0, #getFiltered() - VISIBLE)
+end
+
+local function runCmd(input)
     input = input:gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
     local parts = {}
-    for part in input:gmatch("%S+") do table.insert(parts, part) end
+    for p in input:gmatch("%S+") do table.insert(parts, p) end
     if #parts == 0 then return false end
     
-    local cmdName = parts[1]:lower()
+    local name = parts[1]:lower()
     table.remove(parts, 1)
     
-    for _, cmd in ipairs(commands) do
-        if cmd.name == cmdName then
-            cmd.func(parts)
+    for _, c in ipairs(commands) do
+        if c.name == name then
+            c.fn(parts)
             return true
         end
     end
+    notify("Unknown: " .. name)
     return false
 end
 
 -- ============================================
--- GUI FUNCTIONS
+-- CREATE GUI
 -- ============================================
-local function getFilteredCommands()
-    local filtered = {}
-    local query = searchQuery:lower()
-    for _, cmd in ipairs(commands) do
-        if query == "" or cmd.name:lower():find(query) or cmd.description:lower():find(query) then
-            table.insert(filtered, cmd)
-        end
-    end
-    return filtered
-end
-
 local function createGUI()
     clearGUI()
-    local screenSize = workspace.CurrentCamera.ViewportSize
     
-    local mainFrame = Drawing.new("Square")
-    mainFrame.Visible = true
-    mainFrame.Size = Vector2.new(700, 500)
-    mainFrame.Position = Vector2.new(screenSize.X / 2 - 350, screenSize.Y / 2 - 250)
-    mainFrame.Color = Color3.fromRGB(25, 25, 25)
-    mainFrame.Filled = true
-    mainFrame.Opacity = 0.95
-    mainFrame.Rounding = 10
-    table.insert(guiElements, mainFrame)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    
+    local vw = cam.ViewportSize.X
+    local vh = cam.ViewportSize.Y
+    
+    if guiPosX == nil then
+        guiPosX = math.floor(vw / 2 - W / 2)
+        guiPosY = math.floor(vh / 2 - H / 2)
+    end
+    
+    guiPosX = math.clamp(guiPosX, 0, vw - W)
+    guiPosY = math.clamp(guiPosY, 0, vh - H)
+    
+    local px = guiPosX
+    local py = guiPosY
+    
+    local shadow = Drawing.new("Square")
+    shadow.Visible = true
+    shadow.Filled = true
+    shadow.Color = Color3.fromRGB(0, 0, 0)
+    shadow.Opacity = 0.5
+    shadow.Rounding = 14
+    shadow.Position = Vector2.new(px - 5, py - 5)
+    shadow.Size = Vector2.new(W + 10, H + 10)
+    table.insert(guiElements, shadow)
+    
+    local main = Drawing.new("Square")
+    main.Visible = true
+    main.Filled = true
+    main.Color = Theme.Primary
+    main.Rounding = 10
+    main.Position = Vector2.new(px, py)
+    main.Size = Vector2.new(W, H)
+    table.insert(guiElements, main)
+    
+    local head = Drawing.new("Square")
+    head.Visible = true
+    head.Filled = true
+    head.Color = Theme.Secondary
+    head.Rounding = 10
+    head.Position = Vector2.new(px, py)
+    head.Size = Vector2.new(W, HEADER)
+    table.insert(guiElements, head)
+    headerBounds = { pos = Vector2.new(px, py), size = Vector2.new(W, HEADER) }
+    
+    local hFix = Drawing.new("Square")
+    hFix.Visible = true
+    hFix.Filled = true
+    hFix.Color = Theme.Secondary
+    hFix.Position = Vector2.new(px, py + HEADER - 12)
+    hFix.Size = Vector2.new(W, 14)
+    table.insert(guiElements, hFix)
+    
+    local logoRing = Drawing.new("Circle")
+    logoRing.Visible = true
+    logoRing.Filled = false
+    logoRing.Color = Theme.Accent
+    logoRing.NumSides = 24
+    logoRing.Thickness = 3
+    logoRing.Position = Vector2.new(px + 30, py + HEADER / 2)
+    logoRing.Radius = 14
+    table.insert(guiElements, logoRing)
+    
+    local logoT = Drawing.new("Text")
+    logoT.Visible = true
+    logoT.Text = "S"
+    logoT.Size = 16
+    logoT.Color = Theme.Accent
+    logoT.Outline = true
+    logoT.Center = true
+    logoT.Position = Vector2.new(px + 30, py + HEADER / 2 - 8)
+    table.insert(guiElements, logoT)
     
     local title = Drawing.new("Text")
     title.Visible = true
     title.Text = "Command Panel"
-    title.Size = 24
-    title.Position = mainFrame.Position + Vector2.new(20, 15)
-    title.Color = Color3.fromRGB(100, 200, 255)
+    title.Size = 18
+    title.Color = Theme.TextPrimary
     title.Outline = true
+    title.Position = Vector2.new(px + 55, py + HEADER / 2 - 10)
     table.insert(guiElements, title)
     
-    local searchBg = Drawing.new("Square")
-    searchBg.Visible = true
-    searchBg.Size = Vector2.new(660, 35)
-    searchBg.Position = mainFrame.Position + Vector2.new(20, 55)
-    searchBg.Color = searchFocused and Color3.fromRGB(50, 50, 50) or Color3.fromRGB(35, 35, 35)
-    searchBg.Filled = true
-    searchBg.Rounding = 6
-    table.insert(guiElements, searchBg)
-    searchBarPos = searchBg.Position
-    searchBarSize = searchBg.Size
+    local sY = py + HEADER + 10
+    local sW = W - PAD * 2
+    
+    local sBg = Drawing.new("Square")
+    sBg.Visible = true
+    sBg.Filled = true
+    sBg.Color = searchFocused and Theme.Tertiary or Theme.Secondary
+    sBg.Rounding = 6
+    sBg.Position = Vector2.new(px + PAD, sY)
+    sBg.Size = Vector2.new(sW, SEARCH_H)
+    table.insert(guiElements, sBg)
+    searchBounds = { pos = Vector2.new(px + PAD, sY), size = Vector2.new(sW, SEARCH_H) }
     
     if searchFocused then
-        local searchBorder = Drawing.new("Square")
-        searchBorder.Visible = true
-        searchBorder.Size = Vector2.new(660, 35)
-        searchBorder.Position = mainFrame.Position + Vector2.new(20, 55)
-        searchBorder.Color = Color3.fromRGB(100, 200, 255)
-        searchBorder.Filled = false
-        searchBorder.Rounding = 6
-        searchBorder.Thickness = 2
-        table.insert(guiElements, searchBorder)
+        local sBor = Drawing.new("Square")
+        sBor.Visible = true
+        sBor.Filled = false
+        sBor.Color = Theme.Accent
+        sBor.Rounding = 6
+        sBor.Thickness = 2
+        sBor.Position = Vector2.new(px + PAD, sY)
+        sBor.Size = Vector2.new(sW, SEARCH_H)
+        table.insert(guiElements, sBor)
     end
     
-    local displayText = searchQuery ~= "" and searchQuery or (searchFocused and "|" or "Click to search...")
-    local searchText = Drawing.new("Text")
-    searchText.Visible = true
-    searchText.Text = displayText
-    searchText.Size = 18
-    searchText.Position = searchBg.Position + Vector2.new(15, 10)
-    searchText.Color = (searchQuery ~= "" or searchFocused) and Color3.fromRGB(255, 255, 255) or Color3.fromRGB(150, 150, 150)
-    searchText.Outline = true
-    table.insert(guiElements, searchText)
+    local sIcon = Drawing.new("Text")
+    sIcon.Visible = true
+    sIcon.Text = ">"
+    sIcon.Size = 14
+    sIcon.Color = Theme.Accent
+    sIcon.Outline = true
+    sIcon.Position = Vector2.new(px + PAD + 12, sY + 11)
+    table.insert(guiElements, sIcon)
     
-    local filtered = getFilteredCommands()
-    local maxCommands = 6
-    local totalCommands = #filtered
+    local sTxt = Drawing.new("Text")
+    sTxt.Visible = true
+    sTxt.Text = (searchQuery ~= "" and searchQuery or (searchFocused and "" or "Search...")) .. (searchFocused and "|" or "")
+    sTxt.Size = 13
+    sTxt.Color = (searchQuery ~= "" or searchFocused) and Theme.TextPrimary or Theme.TextMuted
+    sTxt.Outline = true
+    sTxt.Position = Vector2.new(px + PAD + 32, sY + 12)
+    table.insert(guiElements, sTxt)
     
-    -- Scrollbar background
-    local scrollbarBg = Drawing.new("Square")
-    scrollbarBg.Visible = true
-    scrollbarBg.Size = Vector2.new(12, 380)
-    scrollbarBg.Position = mainFrame.Position + Vector2.new(675, 105)
-    scrollbarBg.Color = Color3.fromRGB(35, 35, 35)
-    scrollbarBg.Filled = true
-    scrollbarBg.Rounding = 6
-    table.insert(guiElements, scrollbarBg)
-    scrollbarPos = scrollbarBg.Position
-    scrollbarSize = scrollbarBg.Size
+    local contentY = sY + SEARCH_H + 10
+    local contentH = H - HEADER - SEARCH_H - FOOTER_H - 30
+    local contentBottom = contentY + contentH
     
-    -- Scrollbar handle
-    if totalCommands > maxCommands then
-        local handleHeight = math.max(40, (maxCommands / totalCommands) * 380)
-        local maxScroll = totalCommands - maxCommands
-        local handleY = (scrollOffset / maxScroll) * (380 - handleHeight)
+    local filtered = getFiltered()
+    local total = #filtered
+    local mScroll = maxScroll()
+    
+    local scX = px + W - PAD - 6
+    
+    local scTrack = Drawing.new("Square")
+    scTrack.Visible = true
+    scTrack.Filled = true
+    scTrack.Color = Theme.Secondary
+    scTrack.Rounding = 3
+    scTrack.Position = Vector2.new(scX, contentY)
+    scTrack.Size = Vector2.new(6, contentH)
+    table.insert(guiElements, scTrack)
+    scrollBounds = { pos = Vector2.new(scX, contentY), size = Vector2.new(6, contentH) }
+    
+    if total > VISIBLE then
+        local hH = math.max(30, (VISIBLE / total) * contentH)
+        local prog = mScroll > 0 and (scrollOffset / mScroll) or 0
+        local hY = prog * (contentH - hH)
         
-        local scrollHandle = Drawing.new("Square")
-        scrollHandle.Visible = true
-        scrollHandle.Size = Vector2.new(12, handleHeight)
-        scrollHandle.Position = scrollbarBg.Position + Vector2.new(0, handleY)
-        scrollHandle.Color = isDraggingScrollbar and Color3.fromRGB(150, 220, 255) or Color3.fromRGB(100, 200, 255)
-        scrollHandle.Filled = true
-        scrollHandle.Rounding = 6
-        table.insert(guiElements, scrollHandle)
+        local scHandle = Drawing.new("Square")
+        scHandle.Visible = true
+        scHandle.Filled = true
+        scHandle.Color = scrollDragging and Theme.AccentLight or Theme.Accent
+        scHandle.Rounding = 3
+        scHandle.Position = Vector2.new(scX, contentY + hY)
+        scHandle.Size = Vector2.new(6, hH)
+        table.insert(guiElements, scHandle)
     end
     
-    local yOffset = 105
-    local startIdx = scrollOffset + 1
-    local endIdx = math.min(startIdx + maxCommands - 1, totalCommands)
+    local iW = W - PAD * 2 - 14
+    local frac = scrollOffset - math.floor(scrollOffset)
+    local startIdx = math.floor(scrollOffset) + 1
     
-    for i = startIdx, endIdx do
-        local cmd = filtered[i]
-        
-        local cmdBg = Drawing.new("Square")
-        cmdBg.Visible = true
-        cmdBg.Size = Vector2.new(645, 55)
-        cmdBg.Position = mainFrame.Position + Vector2.new(20, yOffset)
-        cmdBg.Color = Color3.fromRGB(40, 40, 40)
-        cmdBg.Filled = true
-        cmdBg.Rounding = 6
-        table.insert(guiElements, cmdBg)
-        
-        local catColor = cmd.category == "Movement" and Color3.fromRGB(80, 180, 80) or
-                         cmd.category == "Visual" and Color3.fromRGB(180, 80, 180) or
-                         cmd.category == "Teleport" and Color3.fromRGB(80, 180, 180) or
-                         Color3.fromRGB(120, 120, 120)
-        
-        local catTag = Drawing.new("Square")
-        catTag.Visible = true
-        catTag.Size = Vector2.new(80, 20)
-        catTag.Position = cmdBg.Position + Vector2.new(15, 8)
-        catTag.Color = catColor
-        catTag.Filled = true
-        catTag.Rounding = 3
-        table.insert(guiElements, catTag)
-        
-        local catText = Drawing.new("Text")
-        catText.Visible = true
-        catText.Text = cmd.category
-        catText.Size = 12
-        catText.Position = catTag.Position + Vector2.new(5, 4)
-        catText.Color = Color3.fromRGB(255, 255, 255)
-        catText.Outline = true
-        table.insert(guiElements, catText)
-        
-        local cmdName = Drawing.new("Text")
-        cmdName.Visible = true
-        cmdName.Text = cmd.usage
-        cmdName.Size = 18
-        cmdName.Position = cmdBg.Position + Vector2.new(110, 8)
-        cmdName.Color = Color3.fromRGB(100, 200, 255)
-        cmdName.Outline = true
-        table.insert(guiElements, cmdName)
-        
-        local cmdDesc = Drawing.new("Text")
-        cmdDesc.Visible = true
-        cmdDesc.Text = cmd.description
-        cmdDesc.Size = 14
-        cmdDesc.Position = cmdBg.Position + Vector2.new(15, 33)
-        cmdDesc.Color = Color3.fromRGB(180, 180, 180)
-        cmdDesc.Outline = true
-        table.insert(guiElements, cmdDesc)
-        
-        yOffset = yOffset + 65
+    for i = 0, VISIBLE + 1 do
+        local idx = startIdx + i
+        local cmd = filtered[idx]
+        if cmd then
+            local baseY = contentY + i * ITEM_H - frac * ITEM_H
+            local itemTop = baseY
+            local itemBottom = baseY + ITEM_H - 4
+            
+            local visibleTop = math.max(itemTop, contentY)
+            local visibleBottom = math.min(itemBottom, contentBottom)
+            local visibleHeight = visibleBottom - visibleTop
+            local totalHeight = ITEM_H - 4
+            
+            local visibility = math.clamp(visibleHeight / totalHeight, 0, 1)
+            
+            if visibility > 0.1 then
+                local opacity = visibility
+                
+                local iBg = Drawing.new("Square")
+                iBg.Visible = true
+                iBg.Filled = true
+                iBg.Color = Theme.Card
+                iBg.Rounding = 6
+                iBg.Opacity = opacity
+                iBg.Position = Vector2.new(px + PAD, math.max(itemTop, contentY))
+                iBg.Size = Vector2.new(iW, math.min(visibleHeight, totalHeight))
+                table.insert(guiElements, iBg)
+                
+                if opacity > 0.4 then
+                    local badgeY = itemTop + 6
+                    if badgeY >= contentY and badgeY + 18 <= contentBottom then
+                        local cBg = Drawing.new("Square")
+                        cBg.Visible = true
+                        cBg.Filled = true
+                        cBg.Color = catColor(cmd.cat)
+                        cBg.Rounding = 4
+                        cBg.Opacity = opacity
+                        cBg.Position = Vector2.new(px + PAD + 10, badgeY)
+                        cBg.Size = Vector2.new(68, 18)
+                        table.insert(guiElements, cBg)
+                        
+                        local cTxt = Drawing.new("Text")
+                        cTxt.Visible = true
+                        cTxt.Text = cmd.cat
+                        cTxt.Size = 9
+                        cTxt.Color = Theme.TextPrimary
+                        cTxt.Outline = true
+                        cTxt.Opacity = opacity
+                        cTxt.Position = Vector2.new(px + PAD + 15, badgeY + 4)
+                        table.insert(guiElements, cTxt)
+                    end
+                    
+                    local usageY = itemTop + 8
+                    if usageY >= contentY and usageY + 14 <= contentBottom then
+                        local uTxt = Drawing.new("Text")
+                        uTxt.Visible = true
+                        uTxt.Text = cmd.usage
+                        uTxt.Size = 13
+                        uTxt.Color = Theme.Accent
+                        uTxt.Outline = true
+                        uTxt.Opacity = opacity
+                        uTxt.Position = Vector2.new(px + PAD + 90, usageY)
+                        table.insert(guiElements, uTxt)
+                    end
+                    
+                    local descY = itemTop + 32
+                    if descY >= contentY and descY + 12 <= contentBottom then
+                        local dTxt = Drawing.new("Text")
+                        dTxt.Visible = true
+                        dTxt.Text = cmd.desc
+                        dTxt.Size = 10
+                        dTxt.Color = Theme.TextSecondary
+                        dTxt.Outline = true
+                        dTxt.Opacity = opacity
+                        dTxt.Position = Vector2.new(px + PAD + 10, descY)
+                        table.insert(guiElements, dTxt)
+                    end
+                end
+            end
+        end
     end
     
-    local closeHint = Drawing.new("Text")
-    closeHint.Visible = true
-    closeHint.Text = "ESC to close"
-    closeHint.Size = 14
-    closeHint.Position = mainFrame.Position + Vector2.new(610, 470)
-    closeHint.Color = Color3.fromRGB(150, 150, 150)
-    closeHint.Outline = true
-    table.insert(guiElements, closeHint)
+    local footerCover = Drawing.new("Square")
+    footerCover.Visible = true
+    footerCover.Filled = true
+    footerCover.Color = Theme.Primary
+    footerCover.Position = Vector2.new(px, contentBottom)
+    footerCover.Size = Vector2.new(W, H - contentBottom + py + 5)
+    table.insert(guiElements, footerCover)
+    
+    local fY = py + H - FOOTER_H + 4
+    
+    local fLine = Drawing.new("Square")
+    fLine.Visible = true
+    fLine.Filled = true
+    fLine.Color = Theme.Secondary
+    fLine.Position = Vector2.new(px + PAD, fY - 8)
+    fLine.Size = Vector2.new(W - PAD * 2, 2)
+    table.insert(guiElements, fLine)
+    
+    local fCount = Drawing.new("Text")
+    fCount.Visible = true
+    fCount.Text = total .. " commands"
+    fCount.Size = 10
+    fCount.Color = Theme.TextMuted
+    fCount.Outline = true
+    fCount.Position = Vector2.new(px + PAD, fY)
+    table.insert(guiElements, fCount)
+    
+    local fHint = Drawing.new("Text")
+    fHint.Visible = true
+    fHint.Text = "ESC to close"
+    fHint.Size = 10
+    fHint.Color = Theme.TextMuted
+    fHint.Outline = true
+    fHint.Position = Vector2.new(px + W - 80, fY)
+    table.insert(guiElements, fHint)
 end
 
-function toggleGUI()
+-- ============================================
+-- TOGGLE GUI
+-- ============================================
+local function toggleGUI()
     guiOpen = not guiOpen
+    heldKeys = {}
     if guiOpen then
         searchQuery = ""
         scrollOffset = 0
+        targetScroll = 0
         searchFocused = false
-        isDraggingScrollbar = false
+        guiDragging = false
+        scrollDragging = false
         createGUI()
     else
         clearGUI()
     end
 end
 
+for _, cmd in ipairs(commands) do
+    if cmd.name == "cmds" then
+        cmd.fn = function() toggleGUI() end
+        break
+    end
+end
+
 -- ============================================
 -- COMMAND BAR
 -- ============================================
-local commandBarVisible = false
-local commandBarElements = {}
-local commandInput = ""
-local autocompleteResults = {}
-local selectedAutocomplete = 0
+local barOpen = false
+local barElements = {}
+local barInput = ""
+local acResults = {}
+local acSelected = 0
 
-local function getAutocompleteResults(input)
-    local results = {}
-    local clean = input:gsub("^;", ""):lower()
-    if clean == "" or clean:find(" ") then return results end
+local function getAC(input)
+    local r = {}
+    local c = input:gsub("^;", ""):lower()
+    if c == "" or c:find(" ") then return r end
     
     for _, cmd in ipairs(commands) do
-        if cmd.name:lower():find(clean, 1, true) == 1 then
-            table.insert(results, cmd)
+        if cmd.name:lower():find(c, 1, true) == 1 then
+            table.insert(r, cmd)
+            if #r >= 5 then break end
         end
     end
-    
-    local limited = {}
-    for i = 1, math.min(#results, 5) do
-        table.insert(limited, results[i])
-    end
-    return limited
+    return r
 end
 
-local function createCommandBar()
-    for _, el in ipairs(commandBarElements) do pcall(function() el:Remove() end) end
-    commandBarElements = {}
+local function createBar()
+    for _, el in ipairs(barElements) do pcall(function() el:Remove() end) end
+    barElements = {}
     
-    local screenSize = workspace.CurrentCamera.ViewportSize
-    autocompleteResults = getAutocompleteResults(commandInput)
-    local acHeight = #autocompleteResults * 35
+    local cam = workspace.CurrentCamera
+    if not cam then return end
     
-    local bg = Drawing.new("Square")
-    bg.Visible = true
-    bg.Size = Vector2.new(600, 50)
-    bg.Position = Vector2.new(screenSize.X / 2 - 300, screenSize.Y - 150 - acHeight)
-    bg.Color = Color3.fromRGB(20, 20, 20)
-    bg.Filled = true
-    bg.Opacity = 0.95
-    bg.Rounding = 8
-    table.insert(commandBarElements, bg)
+    local vw = cam.ViewportSize.X
+    local vh = cam.ViewportSize.Y
+    
+    acResults = getAC(barInput)
+    local acH = #acResults * 36
+    local bW = 480
+    local bH = 48
+    local gap = 8
+    
+    local bX = math.floor(vw / 2 - bW / 2)
+    local bY = math.floor(vh - 80)
+    
+    local shadow = Drawing.new("Square")
+    shadow.Visible = true
+    shadow.Filled = true
+    shadow.Color = Color3.fromRGB(0, 0, 0)
+    shadow.Opacity = 0.5
+    shadow.Rounding = 12
+    shadow.Position = Vector2.new(bX - 4, bY - 4)
+    shadow.Size = Vector2.new(bW + 8, bH + 8)
+    table.insert(barElements, shadow)
+    
+    local bar = Drawing.new("Square")
+    bar.Visible = true
+    bar.Filled = true
+    bar.Color = Theme.Primary
+    bar.Rounding = 8
+    bar.Position = Vector2.new(bX, bY)
+    bar.Size = Vector2.new(bW, bH)
+    table.insert(barElements, bar)
     
     local border = Drawing.new("Square")
     border.Visible = true
-    border.Size = Vector2.new(600, 50)
-    border.Position = bg.Position
-    border.Color = Color3.fromRGB(100, 200, 255)
     border.Filled = false
+    border.Color = Theme.Accent
     border.Rounding = 8
     border.Thickness = 2
-    table.insert(commandBarElements, border)
+    border.Position = Vector2.new(bX, bY)
+    border.Size = Vector2.new(bW, bH)
+    table.insert(barElements, border)
     
-    local inputText = Drawing.new("Text")
-    inputText.Visible = true
-    inputText.Text = commandInput .. ((os.clock() % 1) > 0.5 and "|" or "")
-    inputText.Size = 20
-    inputText.Position = bg.Position + Vector2.new(15, 15)
-    inputText.Color = Color3.fromRGB(255, 255, 255)
-    inputText.Outline = true
-    table.insert(commandBarElements, inputText)
+    local prompt = Drawing.new("Text")
+    prompt.Visible = true
+    prompt.Text = ">"
+    prompt.Size = 18
+    prompt.Color = Theme.Accent
+    prompt.Outline = true
+    prompt.Position = Vector2.new(bX + 14, bY + 14)
+    table.insert(barElements, prompt)
     
-    if #autocompleteResults > 0 then
+    local cur = (os.clock() % 0.7) > 0.35 and "|" or ""
+    local inputT = Drawing.new("Text")
+    inputT.Visible = true
+    inputT.Text = barInput .. cur
+    inputT.Size = 15
+    inputT.Color = Theme.TextPrimary
+    inputT.Outline = true
+    inputT.Position = Vector2.new(bX + 36, bY + 16)
+    table.insert(barElements, inputT)
+    
+    if #acResults > 0 then
+        local dropY = bY - acH - gap - 8
+        
+        local dropShadow = Drawing.new("Square")
+        dropShadow.Visible = true
+        dropShadow.Filled = true
+        dropShadow.Color = Color3.fromRGB(0, 0, 0)
+        dropShadow.Opacity = 0.5
+        dropShadow.Rounding = 8
+        dropShadow.Position = Vector2.new(bX - 4, dropY - 4)
+        dropShadow.Size = Vector2.new(bW + 8, acH + 16)
+        table.insert(barElements, dropShadow)
+        
         local dropBg = Drawing.new("Square")
         dropBg.Visible = true
-        dropBg.Size = Vector2.new(600, acHeight)
-        dropBg.Position = bg.Position + Vector2.new(0, 50)
-        dropBg.Color = Color3.fromRGB(30, 30, 30)
         dropBg.Filled = true
+        dropBg.Color = Theme.Secondary
         dropBg.Rounding = 8
-        table.insert(commandBarElements, dropBg)
+        dropBg.Position = Vector2.new(bX, dropY)
+        dropBg.Size = Vector2.new(bW, acH + 8)
+        table.insert(barElements, dropBg)
         
-        for i, cmd in ipairs(autocompleteResults) do
-            local yPos = bg.Position.Y + 50 + (i - 1) * 35
-            local isSelected = (i == selectedAutocomplete)
+        for i, cmd in ipairs(acResults) do
+            local yP = dropY + (i - 1) * 36 + 4
+            local sel = (i == acSelected)
             
-            if isSelected then
+            if sel then
                 local hl = Drawing.new("Square")
                 hl.Visible = true
-                hl.Size = Vector2.new(596, 33)
-                hl.Position = Vector2.new(bg.Position.X + 2, yPos + 1)
-                hl.Color = Color3.fromRGB(60, 120, 200)
                 hl.Filled = true
+                hl.Color = Theme.Accent
+                hl.Opacity = 0.2
                 hl.Rounding = 4
-                table.insert(commandBarElements, hl)
+                hl.Position = Vector2.new(bX + 4, yP)
+                hl.Size = Vector2.new(bW - 8, 32)
+                table.insert(barElements, hl)
             end
             
-            local cmdText = Drawing.new("Text")
-            cmdText.Visible = true
-            cmdText.Text = ";" .. cmd.name .. " - " .. cmd.description
-            cmdText.Size = 14
-            cmdText.Position = Vector2.new(bg.Position.X + 15, yPos + 10)
-            cmdText.Color = isSelected and Color3.fromRGB(150, 220, 255) or Color3.fromRGB(100, 200, 255)
-            cmdText.Outline = true
-            table.insert(commandBarElements, cmdText)
+            local dot = Drawing.new("Circle")
+            dot.Visible = true
+            dot.Filled = true
+            dot.Color = catColor(cmd.cat)
+            dot.NumSides = 12
+            dot.Position = Vector2.new(bX + 18, yP + 16)
+            dot.Radius = 4
+            table.insert(barElements, dot)
+            
+            local cmdT = Drawing.new("Text")
+            cmdT.Visible = true
+            cmdT.Text = ";" .. cmd.name
+            cmdT.Size = 13
+            cmdT.Color = sel and Theme.AccentLight or Theme.Accent
+            cmdT.Outline = true
+            cmdT.Position = Vector2.new(bX + 30, yP + 8)
+            table.insert(barElements, cmdT)
+            
+            local descT = Drawing.new("Text")
+            descT.Visible = true
+            descT.Text = " - " .. cmd.desc
+            descT.Size = 11
+            descT.Color = Theme.TextMuted
+            descT.Outline = true
+            descT.Position = Vector2.new(bX + 30 + (#cmd.name + 1) * 8 + 5, yP + 9)
+            table.insert(barElements, descT)
         end
     end
 end
 
-local function hideCommandBar()
-    for _, el in ipairs(commandBarElements) do pcall(function() el:Remove() end) end
-    commandBarElements = {}
-    commandBarVisible = false
-    commandInput = ""
-    selectedAutocomplete = 0
+local function hideBar()
+    for _, el in ipairs(barElements) do pcall(function() el:Remove() end) end
+    barElements = {}
+    barOpen = false
+    barInput = ""
+    acSelected = 0
+    heldKeys = {}
 end
 
-local function applyAutocomplete()
-    local cmd = autocompleteResults[selectedAutocomplete] or autocompleteResults[1]
+local function applyAC()
+    local cmd = acResults[acSelected] or acResults[1]
     if cmd then
-        commandInput = ";" .. cmd.name .. (cmd.usage:find("%[") and " " or "")
-        selectedAutocomplete = 0
-        createCommandBar()
+        barInput = ";" .. cmd.name .. (cmd.usage:find("%[") and " " or "")
+        acSelected = 0
     end
 end
 
 -- ============================================
--- INPUT
+-- INPUT HANDLING
 -- ============================================
 local lastKeys = {}
 local lastMouse = false
@@ -566,55 +1401,175 @@ local keyMap = {
     A="a",B="b",C="c",D="d",E="e",F="f",G="g",H="h",I="i",J="j",K="k",L="l",M="m",
     N="n",O="o",P="p",Q="q",R="r",S="s",T="t",U="u",V="v",W="w",X="x",Y="y",Z="z",
     ["0"]="0",["1"]="1",["2"]="2",["3"]="3",["4"]="4",["5"]="5",["6"]="6",["7"]="7",["8"]="8",["9"]="9",
-    Semicolon=";",OEM_1=";",Space=" "
+    Semicolon=";",OEM_1=";",Space=" ",Minus="-",OEM_Minus="-",
+    Period=".",OEM_Period=".",Comma=",",OEM_Comma=","
+}
+
+local specialKeys = {
+    ["esc"]=true,["escape"]=true,["return"]=true,["enter"]=true,["tab"]=true,
+    ["up"]=true,["down"]=true,["left"]=true,["right"]=true,
+    ["back"]=true,["backspace"]=true,
+    ["shift"]=true,["lshift"]=true,["rshift"]=true,
+    ["control"]=true,["lcontrol"]=true,["rcontrol"]=true,
+    ["alt"]=true,["lalt"]=true,["ralt"]=true,["space"]=true
 }
 
 local function isKey(key, ...)
     local k = key:lower()
-    for _, v in ipairs({...}) do if k:find(v) then return true end end
+    for _, v in ipairs({...}) do if k:find(v, 1, true) then return true end end
     return false
 end
 
-local function inRect(p, pos, size)
-    return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
+local function isSpecialKey(key)
+    local k = key:lower()
+    for s, _ in pairs(specialKeys) do if k:find(s, 1, true) then return true end end
+    return false
 end
 
+local function getCharFromKey(key)
+    if keyMap[key] then return keyMap[key] end
+    if isSpecialKey(key) then return nil end
+    return nil
+end
+
+local function addChar(char)
+    if barOpen then
+        barInput = barInput .. char
+        acSelected = 0
+    elseif searchFocused then
+        searchQuery = searchQuery .. char
+        targetScroll = 0
+        scrollOffset = 0
+        createGUI()
+    end
+end
+
+local function deleteChar()
+    if barOpen and #barInput > 1 then
+        barInput = barInput:sub(1, -2)
+        acSelected = 0
+        return true
+    elseif barOpen and #barInput <= 1 then
+        hideBar()
+        return false
+    elseif searchFocused and #searchQuery > 0 then
+        searchQuery = searchQuery:sub(1, -2)
+        targetScroll = 0
+        scrollOffset = 0
+        createGUI()
+        return true
+    end
+    return false
+end
+
+-- ============================================
+-- MAIN LOOP
+-- ============================================
 RunService.Render:Connect(function(dt)
-    -- Teleport
+    updateIntro()
+    checkSpawnpoint()
+    
     if teleportFrames > 0 and teleportTarget then
-        local char = LocalPlayer.Character
-        if char then
-            local root = char:FindFirstChild("HumanoidRootPart")
-            if root then
-                root.CFrame = CFrame.new(teleportTarget)
-                root.Velocity = Vector3.new(0, 0, 0)
+        pcall(function()
+            local char = LocalPlayer.Character
+            if char then
+                local root = char:FindFirstChild("HumanoidRootPart")
+                if root then
+                    root.CFrame = CFrame.new(teleportTarget)
+                    root.Velocity = Vector3.new(0, 0, 0)
+                end
             end
-        end
+        end)
         teleportFrames = teleportFrames - 1
         if teleportFrames == 0 then teleportTarget = nil end
     end
     
-    -- Spectate check
-    specCheckTimer = specCheckTimer + dt
-    if specCheckTimer >= 0.5 then
-        specCheckTimer = 0
+    specTimer = specTimer + dt
+    if specTimer >= 0.5 then
+        specTimer = 0
         checkSpec()
     end
     
-    if commandBarVisible then createCommandBar() end
+    if guiOpen and not guiDragging then
+        local diff = targetScroll - scrollOffset
+        if math.abs(diff) > 0.01 then
+            scrollOffset = scrollOffset + diff * math.min(1, dt * 12)
+            scrollOffset = math.clamp(scrollOffset, 0, maxScroll())
+            createGUI()
+        elseif diff ~= 0 then
+            scrollOffset = targetScroll
+            createGUI()
+        end
+    end
+    
+    if barOpen then createBar() end
     
     local keys = getpressedkeys()
-    local mousePos = Vector2.new(0, 0)
-    pcall(function() mousePos = UserInputService:GetMouseLocation() end)
+    local mPos = Vector2.new(0, 0)
+    pcall(function() mPos = UserInputService:GetMouseLocation() end)
     
-    local mouseDown = isleftpressed()
-    local mouseClick = mouseDown and not lastMouse
+    local mDown = isleftpressed()
+    local mClick = mDown and not lastMouse
+    local currentTime = os.clock()
     
-    -- GUI interactions
+    local currentKeySet = {}
+    for _, k in ipairs(keys) do currentKeySet[k] = true end
+    
+    local keysToRemove = {}
+    for key, _ in pairs(heldKeys) do
+        if not currentKeySet[key] then table.insert(keysToRemove, key) end
+    end
+    for _, key in ipairs(keysToRemove) do heldKeys[key] = nil end
+    
+    for _, key in ipairs(keys) do
+        local char = getCharFromKey(key)
+        local isBackspace = isKey(key, "back")
+        
+        if char or isBackspace then
+            if heldKeys[key] then
+                local holdData = heldKeys[key]
+                local holdDuration = currentTime - holdData.startTime
+                
+                if holdDuration >= KEY_INITIAL_DELAY then
+                    local timeSinceLastRepeat = currentTime - holdData.lastRepeat
+                    if timeSinceLastRepeat >= KEY_REPEAT_RATE then
+                        if isBackspace then deleteChar()
+                        elseif char and (barOpen or searchFocused) then addChar(char) end
+                        holdData.lastRepeat = currentTime
+                    end
+                end
+            else
+                local wasPressed = false
+                for _, lk in ipairs(lastKeys) do if lk == key then wasPressed = true break end end
+                
+                if not wasPressed then
+                    heldKeys[key] = { startTime = currentTime, lastRepeat = currentTime, char = char }
+                    if isBackspace then deleteChar()
+                    elseif char and (barOpen or searchFocused) then addChar(char) end
+                end
+            end
+        end
+    end
+    
     if guiOpen then
-        -- Search bar click
-        if mouseClick and searchBarPos then
-            if inRect(mousePos, searchBarPos, searchBarSize) then
+        if mClick and inRect(mPos, headerBounds.pos, headerBounds.size) and not inRect(mPos, searchBounds.pos, searchBounds.size) then
+            guiDragging = true
+            guiDragOffset = Vector2.new(mPos.X - guiPosX, mPos.Y - guiPosY)
+        end
+        
+        if not mDown then
+            guiDragging = false
+            scrollDragging = false
+        end
+        
+        if guiDragging then
+            guiPosX = mPos.X - guiDragOffset.X
+            guiPosY = mPos.Y - guiDragOffset.Y
+            createGUI()
+        end
+        
+        if mClick and not guiDragging then
+            if inRect(mPos, searchBounds.pos, searchBounds.size) then
                 searchFocused = true
                 createGUI()
             elseif searchFocused then
@@ -623,91 +1578,69 @@ RunService.Render:Connect(function(dt)
             end
         end
         
-        -- Scrollbar dragging
-        if scrollbarPos and scrollbarSize then
-            if mouseDown and inRect(mousePos, scrollbarPos, scrollbarSize) then
-                isDraggingScrollbar = true
-            end
-            
-            if not mouseDown then
-                isDraggingScrollbar = false
-            end
-            
-            if isDraggingScrollbar then
-                local filtered = getFilteredCommands()
-                local maxCommands = 6
-                local totalCommands = #filtered
-                
-                if totalCommands > maxCommands then
-                    local maxScroll = totalCommands - maxCommands
-                    local relativeY = mousePos.Y - scrollbarPos.Y
-                    local scrollPercent = math.clamp(relativeY / scrollbarSize.Y, 0, 1)
-                    scrollOffset = math.floor(scrollPercent * maxScroll)
-                    createGUI()
-                end
+        if mClick and inRect(mPos, scrollBounds.pos, scrollBounds.size) then
+            scrollDragging = true
+            scrollDragStartY = mPos.Y
+            scrollDragStartOff = scrollOffset
+        end
+        
+        if scrollDragging then
+            local ms = maxScroll()
+            if ms > 0 then
+                local contentH = H - HEADER - SEARCH_H - FOOTER_H - 30
+                local filtered = getFiltered()
+                local total = #filtered
+                local hH = math.max(30, (VISIBLE / total) * contentH)
+                local range = contentH - hH
+                local delta = mPos.Y - scrollDragStartY
+                local sDelta = (delta / range) * ms
+                targetScroll = math.clamp(scrollDragStartOff + sDelta, 0, ms)
+                scrollOffset = targetScroll
+                createGUI()
             end
         end
     end
     
-    lastMouse = mouseDown
+    if not mDown then
+        guiDragging = false
+        scrollDragging = false
+    end
+    
+    lastMouse = mDown
     
     for _, key in ipairs(keys) do
-        local wasPressed = false
-        for _, lk in ipairs(lastKeys) do if lk == key then wasPressed = true break end end
+        local was = false
+        for _, lk in ipairs(lastKeys) do if lk == key then was = true break end end
         
-        if not wasPressed then
-            local mapped = keyMap[key]
-            
+        if not was then
             if isKey(key, "esc") then
                 if searchFocused then searchFocused = false createGUI()
                 elseif guiOpen then toggleGUI() end
-                if commandBarVisible then hideCommandBar() end
-                
+                if barOpen then hideBar() end
             elseif isKey(key, "return", "enter") then
-                if commandBarVisible then executeCommand(commandInput) hideCommandBar()
+                if barOpen then runCmd(barInput) hideBar()
                 elseif searchFocused then searchFocused = false createGUI() end
-                
             elseif isKey(key, "tab") then
-                if commandBarVisible and #autocompleteResults > 0 then applyAutocomplete() end
-                
+                if barOpen and #acResults > 0 then applyAC() end
             elseif isKey(key, "up") then
-                if commandBarVisible and #autocompleteResults > 0 then
-                    selectedAutocomplete = selectedAutocomplete - 1
-                    if selectedAutocomplete < 1 then selectedAutocomplete = #autocompleteResults end
+                if barOpen and #acResults > 0 then
+                    acSelected = acSelected - 1
+                    if acSelected < 1 then acSelected = #acResults end
+                elseif guiOpen and not searchFocused then
+                    targetScroll = math.max(0, targetScroll - 1)
                 end
-                
             elseif isKey(key, "down") then
-                if commandBarVisible and #autocompleteResults > 0 then
-                    selectedAutocomplete = selectedAutocomplete + 1
-                    if selectedAutocomplete > #autocompleteResults then selectedAutocomplete = 1 end
+                if barOpen and #acResults > 0 then
+                    acSelected = acSelected + 1
+                    if acSelected > #acResults then acSelected = 1 end
+                elseif guiOpen and not searchFocused then
+                    targetScroll = math.min(maxScroll(), targetScroll + 1)
                 end
-                
-            elseif (mapped == ";" or key == "Semicolon" or key == "OEM_1") and not commandBarVisible and not searchFocused then
-                commandBarVisible = true
-                commandInput = ";"
-                selectedAutocomplete = 0
-                createCommandBar()
-                
-            elseif isKey(key, "back") then
-                if commandBarVisible then
-                    if #commandInput > 1 then commandInput = commandInput:sub(1, -2) createCommandBar()
-                    else hideCommandBar() end
-                elseif searchFocused and #searchQuery > 0 then
-                    searchQuery = searchQuery:sub(1, -2)
-                    scrollOffset = 0
-                    createGUI()
-                end
-                
-            elseif mapped and mapped ~= ";" then
-                if commandBarVisible then
-                    commandInput = commandInput .. mapped
-                    selectedAutocomplete = 0
-                    createCommandBar()
-                elseif searchFocused then
-                    searchQuery = searchQuery .. mapped
-                    scrollOffset = 0
-                    createGUI()
-                end
+            elseif isKey(key, "semicolon", "oem_1") and not barOpen and not searchFocused then
+                barOpen = true
+                barInput = ";"
+                acSelected = 0
+                heldKeys = {}
             end
         end
     end
