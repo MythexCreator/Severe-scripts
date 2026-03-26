@@ -35,6 +35,23 @@ if not LocalPlayer then
 end
 
 -- ============================================
+-- HELPER FUNCTIONS
+-- ============================================
+local function magnitude(v)
+    if not v then return 0 end
+    local x, y, z = v.X or 0, v.Y or 0, v.Z or 0
+    return math.sqrt(x * x + y * y + z * z)
+end
+
+local function distance(v1, v2)
+    if not v1 or not v2 then return 0 end
+    local dx = (v1.X or 0) - (v2.X or 0)
+    local dy = (v1.Y or 0) - (v2.Y or 0)
+    local dz = (v1.Z or 0) - (v2.Z or 0)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- ============================================
 -- THEME
 -- ============================================
 local Theme = {
@@ -100,15 +117,6 @@ local Features = {
     thirdPersonEnabled = false,
     thirdPersonDistance = 10,
     thirdPersonHeight = 2,
-    
-    -- Fling
-    flingTarget = nil,
-    flingPhase = "idle",
-    flingFrames = 0,
-    flingSavedPos = nil,
-    flingQuickFrames = 30,
-    flingQuickVel = 14000,
-    flingReturnFrames = 12,
 }
 
 local Teleport = {
@@ -278,39 +286,64 @@ local Input = {
     heldKeys = {},
     KEY_INITIAL_DELAY = 0.4,
     KEY_REPEAT_RATE = 0.033,
+    lastScrollTime = 0,
 }
 
 -- ============================================
--- THEME PRESETS
+-- THEME PRESETS (ROZSZERZONE)
 -- ============================================
 local accentPresets = {
+    -- Oryginalne
     {name = "Gold", accent = Color3.fromRGB(255, 196, 0), light = Color3.fromRGB(255, 215, 70), dark = Color3.fromRGB(200, 155, 0)},
     {name = "Indigo", accent = Color3.fromRGB(99, 102, 241), light = Color3.fromRGB(139, 142, 255), dark = Color3.fromRGB(79, 82, 200)},
     {name = "Emerald", accent = Color3.fromRGB(16, 185, 129), light = Color3.fromRGB(52, 211, 153), dark = Color3.fromRGB(5, 150, 105)},
     {name = "Rose", accent = Color3.fromRGB(244, 63, 94), light = Color3.fromRGB(251, 113, 133), dark = Color3.fromRGB(225, 29, 72)},
     {name = "Cyan", accent = Color3.fromRGB(6, 182, 212), light = Color3.fromRGB(34, 211, 238), dark = Color3.fromRGB(8, 145, 178)},
     {name = "Purple", accent = Color3.fromRGB(168, 85, 247), light = Color3.fromRGB(192, 132, 252), dark = Color3.fromRGB(147, 51, 234)},
+    -- Nowe
     {name = "Red", accent = Color3.fromRGB(239, 68, 68), light = Color3.fromRGB(248, 113, 113), dark = Color3.fromRGB(220, 38, 38)},
     {name = "Blue", accent = Color3.fromRGB(59, 130, 246), light = Color3.fromRGB(96, 165, 250), dark = Color3.fromRGB(37, 99, 235)},
     {name = "Green", accent = Color3.fromRGB(34, 197, 94), light = Color3.fromRGB(74, 222, 128), dark = Color3.fromRGB(22, 163, 74)},
     {name = "Orange", accent = Color3.fromRGB(249, 115, 22), light = Color3.fromRGB(251, 146, 60), dark = Color3.fromRGB(234, 88, 12)},
     {name = "Pink", accent = Color3.fromRGB(236, 72, 153), light = Color3.fromRGB(244, 114, 182), dark = Color3.fromRGB(219, 39, 119)},
     {name = "Teal", accent = Color3.fromRGB(20, 184, 166), light = Color3.fromRGB(45, 212, 191), dark = Color3.fromRGB(13, 148, 136)},
+    {name = "Violet", accent = Color3.fromRGB(139, 92, 246), light = Color3.fromRGB(167, 139, 250), dark = Color3.fromRGB(124, 58, 237)},
+    {name = "Amber", accent = Color3.fromRGB(245, 158, 11), light = Color3.fromRGB(251, 191, 36), dark = Color3.fromRGB(217, 119, 6)},
+    {name = "Lime", accent = Color3.fromRGB(132, 204, 22), light = Color3.fromRGB(163, 230, 53), dark = Color3.fromRGB(101, 163, 13)},
+    {name = "Sky", accent = Color3.fromRGB(14, 165, 233), light = Color3.fromRGB(56, 189, 248), dark = Color3.fromRGB(2, 132, 199)},
+    {name = "Fuchsia", accent = Color3.fromRGB(217, 70, 239), light = Color3.fromRGB(232, 121, 249), dark = Color3.fromRGB(192, 38, 211)},
+    {name = "Coral", accent = Color3.fromRGB(255, 127, 80), light = Color3.fromRGB(255, 160, 122), dark = Color3.fromRGB(255, 99, 71)},
+    {name = "Mint", accent = Color3.fromRGB(0, 255, 170), light = Color3.fromRGB(102, 255, 204), dark = Color3.fromRGB(0, 204, 136)},
+    {name = "Lavender", accent = Color3.fromRGB(180, 130, 255), light = Color3.fromRGB(210, 170, 255), dark = Color3.fromRGB(150, 100, 220)},
+    {name = "Sunset", accent = Color3.fromRGB(255, 100, 50), light = Color3.fromRGB(255, 140, 90), dark = Color3.fromRGB(220, 70, 30)},
+    {name = "Ice", accent = Color3.fromRGB(150, 220, 255), light = Color3.fromRGB(190, 240, 255), dark = Color3.fromRGB(100, 180, 230)},
+    {name = "Neon", accent = Color3.fromRGB(57, 255, 20), light = Color3.fromRGB(120, 255, 100), dark = Color3.fromRGB(30, 200, 10)},
+    {name = "Cherry", accent = Color3.fromRGB(222, 49, 99), light = Color3.fromRGB(240, 100, 140), dark = Color3.fromRGB(180, 30, 70)},
 }
 
 local fillPresets = {
+    -- Oryginalne
     {name = "Dark", primary = Color3.fromRGB(10, 10, 14), secondary = Color3.fromRGB(18, 18, 24), tertiary = Color3.fromRGB(28, 28, 36), card = Color3.fromRGB(22, 22, 30), border = Color3.fromRGB(40, 40, 50)},
     {name = "Darker", primary = Color3.fromRGB(5, 5, 8), secondary = Color3.fromRGB(12, 12, 16), tertiary = Color3.fromRGB(20, 20, 26), card = Color3.fromRGB(15, 15, 20), border = Color3.fromRGB(30, 30, 40)},
     {name = "Midnight", primary = Color3.fromRGB(8, 8, 18), secondary = Color3.fromRGB(14, 14, 28), tertiary = Color3.fromRGB(22, 22, 40), card = Color3.fromRGB(18, 18, 34), border = Color3.fromRGB(35, 35, 55)},
     {name = "Navy", primary = Color3.fromRGB(10, 15, 25), secondary = Color3.fromRGB(15, 22, 35), tertiary = Color3.fromRGB(22, 32, 48), card = Color3.fromRGB(18, 26, 40), border = Color3.fromRGB(35, 45, 60)},
     {name = "Charcoal", primary = Color3.fromRGB(18, 18, 18), secondary = Color3.fromRGB(28, 28, 28), tertiary = Color3.fromRGB(38, 38, 38), card = Color3.fromRGB(32, 32, 32), border = Color3.fromRGB(50, 50, 50)},
     {name = "Slate", primary = Color3.fromRGB(15, 20, 25), secondary = Color3.fromRGB(25, 32, 38), tertiary = Color3.fromRGB(35, 44, 52), card = Color3.fromRGB(28, 36, 44), border = Color3.fromRGB(50, 60, 70)},
+    -- Nowe
     {name = "Wine", primary = Color3.fromRGB(18, 8, 12), secondary = Color3.fromRGB(28, 14, 20), tertiary = Color3.fromRGB(40, 22, 30), card = Color3.fromRGB(32, 16, 24), border = Color3.fromRGB(55, 30, 40)},
     {name = "Forest", primary = Color3.fromRGB(8, 14, 10), secondary = Color3.fromRGB(14, 22, 16), tertiary = Color3.fromRGB(22, 34, 26), card = Color3.fromRGB(16, 26, 20), border = Color3.fromRGB(35, 50, 40)},
     {name = "Ocean", primary = Color3.fromRGB(8, 12, 18), secondary = Color3.fromRGB(12, 20, 30), tertiary = Color3.fromRGB(18, 30, 44), card = Color3.fromRGB(14, 24, 36), border = Color3.fromRGB(30, 45, 60)},
     {name = "Void", primary = Color3.fromRGB(2, 2, 4), secondary = Color3.fromRGB(8, 8, 12), tertiary = Color3.fromRGB(14, 14, 20), card = Color3.fromRGB(10, 10, 15), border = Color3.fromRGB(25, 25, 35)},
     {name = "Abyss", primary = Color3.fromRGB(0, 0, 0), secondary = Color3.fromRGB(6, 6, 8), tertiary = Color3.fromRGB(12, 12, 16), card = Color3.fromRGB(8, 8, 12), border = Color3.fromRGB(20, 20, 28)},
     {name = "Graphite", primary = Color3.fromRGB(22, 22, 26), secondary = Color3.fromRGB(32, 32, 38), tertiary = Color3.fromRGB(44, 44, 52), card = Color3.fromRGB(38, 38, 45), border = Color3.fromRGB(55, 55, 65)},
+    {name = "Obsidian", primary = Color3.fromRGB(5, 5, 10), secondary = Color3.fromRGB(10, 10, 18), tertiary = Color3.fromRGB(18, 18, 28), card = Color3.fromRGB(12, 12, 22), border = Color3.fromRGB(28, 28, 40)},
+    {name = "Shadow", primary = Color3.fromRGB(8, 8, 8), secondary = Color3.fromRGB(14, 14, 14), tertiary = Color3.fromRGB(22, 22, 22), card = Color3.fromRGB(18, 18, 18), border = Color3.fromRGB(35, 35, 35)},
+    {name = "Eclipse", primary = Color3.fromRGB(12, 8, 16), secondary = Color3.fromRGB(20, 14, 26), tertiary = Color3.fromRGB(30, 22, 38), card = Color3.fromRGB(24, 18, 32), border = Color3.fromRGB(45, 35, 55)},
+    {name = "Storm", primary = Color3.fromRGB(12, 14, 18), secondary = Color3.fromRGB(20, 24, 30), tertiary = Color3.fromRGB(30, 36, 44), card = Color3.fromRGB(24, 28, 36), border = Color3.fromRGB(45, 52, 62)},
+    {name = "Ember", primary = Color3.fromRGB(16, 10, 8), secondary = Color3.fromRGB(26, 16, 12), tertiary = Color3.fromRGB(38, 24, 18), card = Color3.fromRGB(30, 20, 14), border = Color3.fromRGB(52, 38, 30)},
+    {name = "Frost", primary = Color3.fromRGB(10, 14, 18), secondary = Color3.fromRGB(16, 22, 28), tertiary = Color3.fromRGB(24, 32, 40), card = Color3.fromRGB(20, 26, 34), border = Color3.fromRGB(40, 50, 60)},
+    {name = "Phantom", primary = Color3.fromRGB(14, 12, 16), secondary = Color3.fromRGB(22, 18, 26), tertiary = Color3.fromRGB(32, 28, 38), card = Color3.fromRGB(26, 22, 32), border = Color3.fromRGB(48, 42, 55)},
+    {name = "Onyx", primary = Color3.fromRGB(6, 6, 6), secondary = Color3.fromRGB(12, 12, 12), tertiary = Color3.fromRGB(20, 20, 20), card = Color3.fromRGB(16, 16, 16), border = Color3.fromRGB(32, 32, 32)},
 }
 
 -- ============================================
@@ -328,7 +361,7 @@ local Categories = {
 -- ============================================
 -- PLAYER ARG COMMANDS
 -- ============================================
-local playerArgCommands = {tp = true, view = true, userid = true, fling = true}
+local playerArgCommands = {tp = true, view = true, userid = true}
 
 -- ============================================
 -- COMMANDS FOR PANEL
@@ -353,7 +386,6 @@ local commandsForPanel = {
     {name = "diedtp", desc = "Auto return to death location", cat = "TELEPORT"},
     {name = "undiedtp", desc = "Disable death return", cat = "TELEPORT"},
     {name = "gravity [num]", desc = "Set world gravity", cat = "FUN"},
-    {name = "fling [player]", desc = "Fling a player", cat = "FUN"},
     {name = "antivoid", desc = "Teleport to spawn when falling", cat = "ETC"},
     {name = "unantivoid", desc = "Disable anti-void", cat = "ETC"},
     {name = "forcereset", desc = "Force kill (bypass reset locks)", cat = "ETC"},
@@ -794,131 +826,6 @@ local function updateThirdPerson()
     end)
 end
 
-local function getHRP()
-    local char = LocalPlayer.Character
-    return char and char:FindFirstChild("HumanoidRootPart")
-end
-
-local function getTargetHRP(player)
-    local ok, char = pcall(function() return player.Character end)
-    if not ok or not char then return nil end
-    return char:FindFirstChild("HumanoidRootPart")
-end
-
-local function readPos(part)
-    local ok, pos = pcall(function() return part.Position end)
-    if not ok or not pos then return nil end
-    return {x = pos.X, y = pos.Y, z = pos.Z}
-end
-
-local function safe(v, fb)
-    if type(v) ~= "number" or v ~= v or v == math.huge or v == -math.huge then return fb end
-    return v
-end
-
-local function startFling(targetName)
-    if Features.flingPhase ~= "idle" then
-        notify("Fling already in progress")
-        return
-    end
-    
-    local target = findPlayer(targetName)
-    if not target then
-        notify("Player not found: " .. targetName)
-        return
-    end
-    
-    local thrp = getTargetHRP(target)
-    if not thrp then
-        notify(target.Name .. " has no character")
-        return
-    end
-    
-    local myHrp = getHRP()
-    if not myHrp then
-        notify("You have no character")
-        return
-    end
-    
-    local myPos = readPos(myHrp)
-    if not myPos then return end
-    
-    Features.flingSavedPos = myPos
-    Features.flingTarget = target
-    Features.flingFrames = Features.flingQuickFrames
-    Features.flingPhase = "fling"
-    
-    notify("Flinging " .. target.Name)
-end
-
-local function updateFling()
-    if Features.flingPhase == "idle" then return end
-    
-    local myHrp = getHRP()
-    if not myHrp then
-        Features.flingPhase = "idle"
-        Features.flingFrames = 0
-        return
-    end
-    
-    if Features.flingPhase == "fling" then
-        local thrp = Features.flingTarget and getTargetHRP(Features.flingTarget)
-        
-        if thrp then
-            local vel = Features.flingQuickVel
-            
-            pcall(function()
-                local tCF = thrp.CFrame
-                if not tCF then return end
-                
-                local tPos = tCF.Position
-                local tx = safe(tPos.X, 0)
-                local ty = safe(tPos.Y, 0)
-                local tz = safe(tPos.Z, 0)
-                
-                myHrp.Velocity = Vector3.new(
-                    math.random(-vel, vel),
-                    math.random(vel / 3, vel),
-                    math.random(-vel, vel)
-                )
-                
-                myHrp.RotVelocity = Vector3.new(
-                    math.random(-600, 600),
-                    math.random(-600, 600),
-                    math.random(-600, 600)
-                )
-                
-                myHrp.CFrame = CFrame.new(tx, ty, tz)
-            end)
-        end
-        
-        Features.flingFrames = Features.flingFrames - 1
-        if Features.flingFrames <= 0 then
-            Features.flingPhase = "return"
-            Features.flingFrames = Features.flingReturnFrames
-        end
-        return
-    end
-    
-    if Features.flingPhase == "return" then
-        if Features.flingSavedPos then
-            pcall(function()
-                myHrp.CFrame = CFrame.new(Features.flingSavedPos.x, Features.flingSavedPos.y, Features.flingSavedPos.z)
-                myHrp.Velocity = Vector3.new(0, 0, 0)
-                myHrp.RotVelocity = Vector3.new(0, 0, 0)
-            end)
-        end
-        
-        Features.flingFrames = Features.flingFrames - 1
-        if Features.flingFrames <= 0 then
-            Features.flingPhase = "idle"
-            Features.flingSavedPos = nil
-            Features.flingTarget = nil
-            notify("Fling complete")
-        end
-    end
-end
-
 local function antiVoidOn()
     if Features.antiVoidEnabled then return end
     Features.antiVoidEnabled = true
@@ -1112,8 +1019,8 @@ local function checkSpawnpoint()
     if not Spawnpoint.wasAlive and isAlive then shouldTeleport = true end
     if Spawnpoint.lastHealth <= 0 and currentHealth >= currentMaxHealth * 0.9 then shouldTeleport = true end
     if Spawnpoint.lastPosition and not Spawnpoint.justTeleported then
-        local distance = (currentPosition - Spawnpoint.lastPosition).Magnitude
-        if distance > 100 and currentHealth >= currentMaxHealth * 0.8 then shouldTeleport = true end
+        local dist = distance(currentPosition, Spawnpoint.lastPosition)
+        if dist > 100 and currentHealth >= currentMaxHealth * 0.8 then shouldTeleport = true end
     end
     if Spawnpoint.lastMaxHealth > 0 and currentMaxHealth ~= Spawnpoint.lastMaxHealth then
         if currentHealth >= currentMaxHealth * 0.9 then shouldTeleport = true end
@@ -1249,7 +1156,6 @@ local commands = {
     {name = "keybinds", desc = "Show active features panel", usage = ";keybinds", cat = "Utility", fn = function() showKeybindsGui() end},
     {name = "unkeybinds", desc = "Hide active features panel", usage = ";unkeybinds", cat = "Utility", fn = function() hideKeybindsGui() end},
     {name = "gravity", desc = "Set world gravity", usage = ";gravity [num]", cat = "Fun", fn = function(a) if a[1] then setGravity(a[1]) else resetGravity() end end},
-    {name = "fling", desc = "Fling a player", usage = ";fling [player]", cat = "Fun", args = "player", fn = function(a) if a[1] then startFling(a[1]) else notify("Usage: ;fling [player]") end end},
 }
 
 toggleFeatures = {
@@ -1313,6 +1219,7 @@ end
 local function optionsMaxScroll()
     return math.max(0, #getOptionsFiltered() - Options.VISIBLE)
 end
+
 -- ============================================
 -- CLEAR FUNCTIONS
 -- ============================================
@@ -2177,6 +2084,8 @@ local function createOptions()
         local startIdx = math.floor(Options.scrollOffset) + 1
         local endIdx = math.min(startIdx + Options.VISIBLE - 1, #items)
         
+        local contentH = Options.VISIBLE * (Options.ITEM_H + 4) - 4
+        
         for i = startIdx, endIdx do
             local cmd = items[i]
             local localIdx = i - startIdx
@@ -2254,7 +2163,7 @@ local function createOptions()
         if maxScroll > 0 then
             local scrollbarX = px + Options.W - Options.PAD - 8
             local scrollbarY = contentStartY
-            local scrollbarH = Options.VISIBLE * (Options.ITEM_H + 4) - 4
+            local scrollbarH = contentH
             local thumbH = math.max(30, scrollbarH * (Options.VISIBLE / #items))
             local thumbY = scrollbarY + (Options.scrollOffset / maxScroll) * (scrollbarH - thumbH)
             
@@ -2275,6 +2184,15 @@ local function createOptions()
             scrollThumb.Position = Vector2.new(scrollbarX, thumbY)
             scrollThumb.Size = Vector2.new(5, thumbH)
             table.insert(els, scrollThumb)
+            
+            Options.scrollBounds = {
+                pos = Vector2.new(scrollbarX, scrollbarY),
+                size = Vector2.new(5, scrollbarH),
+                thumbH = thumbH,
+                maxScroll = maxScroll
+            }
+        else
+            Options.scrollBounds = {pos = Vector2.new(0,0), size = Vector2.new(0,0)}
         end
         
     elseif Options.tab == "theme" then
@@ -2842,7 +2760,9 @@ local keyMap = {
     A="a",B="b",C="c",D="d",E="e",F="f",G="g",H="h",I="i",J="j",K="k",L="l",M="m",
     N="n",O="o",P="p",Q="q",R="r",S="s",T="t",U="u",V="v",W="w",X="x",Y="y",Z="z",
     ["0"]="0",["1"]="1",["2"]="2",["3"]="3",["4"]="4",["5"]="5",["6"]="6",["7"]="7",["8"]="8",["9"]="9",
-    Semicolon=";",OEM_1=";",Space=" ",Minus="-",Period=".",Comma=","
+    Semicolon=";",OEM_1=";",Space=" ",Minus="-",Period=".",Comma=",",
+    Slash="/",Backslash="\\",Equals="=",LeftBracket="[",RightBracket="]",
+    Quote="'",BackQuote="`"
 }
 
 local function getCharFromKey(key)
@@ -2956,6 +2876,35 @@ local function updateLogic(dt)
     end
 end
 
+local function handleScroll(delta)
+    local mPos = Vector2.new(0, 0)
+    pcall(function() mPos = UserInputService:GetMouseLocation() end)
+    
+    if CommandPanel.open and CommandPanelDrawing.contentBounds then
+        if inRect(mPos, CommandPanelDrawing.contentBounds.pos, CommandPanelDrawing.contentBounds.size) then
+            local filtered = getFilteredPanelCommands()
+            local maxScroll = math.max(0, #filtered - CommandPanelDrawing.maxVisible)
+            CommandPanelDrawing.scrollOffset = math.clamp(CommandPanelDrawing.scrollOffset - delta, 0, maxScroll)
+            createCommandPanelDrawing()
+            return true
+        end
+    end
+    
+    if Options.open and Options.tab == "keybinds" then
+        local contentY = Options.posY + Options.HEADER + Options.TAB_H + 25
+        local contentH = Options.VISIBLE * (Options.ITEM_H + 4)
+        local contentBounds = {pos = Vector2.new(Options.posX, contentY), size = Vector2.new(Options.W, contentH)}
+        
+        if inRect(mPos, contentBounds.pos, contentBounds.size) then
+            Options.targetScroll = math.clamp(Options.targetScroll - delta, 0, optionsMaxScroll())
+            Options.needsRedraw = true
+            return true
+        end
+    end
+    
+    return false
+end
+
 local function updateInput()
     local keys = getpressedkeys()
     local mPos = Vector2.new(0, 0)
@@ -2964,6 +2913,22 @@ local function updateInput()
     local mDown = isleftpressed()
     local mClick = mDown and not Input.lastMouse
     local currentTime = os_clock()
+    
+    -- Handle scroll wheel
+    local scrollDelta = 0
+    for _, key in keys do
+        if not table.find(Input.lastKeys, key) then
+            if isKey(key, "mousewheelforward", "scrollup") then
+                scrollDelta = 1
+            elseif isKey(key, "mousewheelbackward", "scrolldown") then
+                scrollDelta = -1
+            end
+        end
+    end
+    
+    if scrollDelta ~= 0 then
+        handleScroll(scrollDelta)
+    end
     
     if not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
         for _, key in keys do
@@ -2978,7 +2943,7 @@ local function updateInput()
         for _, key in keys do
             if not table.find(Input.lastKeys, key) then
                 local keyLower = string.lower(key)
-                if not isKey(key, "esc", "return", "enter", "mouse") then
+                if not isKey(key, "esc", "return", "enter", "mouse", "scroll") then
                     Settings.commandBarKey = keyLower
                     notify("Command bar key set to " .. formatKeyName(keyLower))
                     Keybinds.settingCommandBarKey = false
@@ -2995,7 +2960,7 @@ local function updateInput()
         for _, key in keys do
             if not table.find(Input.lastKeys, key) then
                 local keyLower = string.lower(key)
-                if not isKey(key, "esc", "return", "enter", "mouse") then
+                if not isKey(key, "esc", "return", "enter", "mouse", "scroll") then
                     setKeybind(keyLower, Keybinds.settingFor)
                     notify("Bound " .. Keybinds.settingFor .. " to " .. formatKeyName(keyLower))
                     Keybinds.settingFor = nil
@@ -3066,7 +3031,7 @@ local function updateInput()
             createCommandPanelDrawing()
         end
         
-        if CommandPanelDrawing.scrollBounds.pos then
+        if CommandPanelDrawing.scrollBounds and CommandPanelDrawing.scrollBounds.pos then
             if mClick and inRect(mPos, CommandPanelDrawing.scrollBounds.pos, CommandPanelDrawing.scrollBounds.size) then
                 CommandPanelDrawing.scrollDragging = true
                 CommandPanelDrawing.scrollDragStartY = mPos.Y
@@ -3074,7 +3039,7 @@ local function updateInput()
             end
         end
         
-        if CommandPanelDrawing.scrollDragging and CommandPanelDrawing.scrollBounds.maxScroll then
+        if CommandPanelDrawing.scrollDragging and CommandPanelDrawing.scrollBounds and CommandPanelDrawing.scrollBounds.maxScroll then
             local delta = mPos.Y - CommandPanelDrawing.scrollDragStartY
             local scrollbarH = CommandPanelDrawing.scrollBounds.size.Y
             local thumbH = CommandPanelDrawing.scrollBounds.thumbH
@@ -3134,11 +3099,34 @@ local function updateInput()
         end
         if not mDown then 
             Options.dragging = false 
+            Options.scrollDragging = false
         end
         if Options.dragging then
             Options.posX = mPos.X - Options.dragOffset.X
             Options.posY = mPos.Y - Options.dragOffset.Y
             Options.needsRedraw = true
+        end
+        
+        -- Options scroll dragging
+        if Options.tab == "keybinds" and Options.scrollBounds and Options.scrollBounds.pos then
+            if mClick and inRect(mPos, Options.scrollBounds.pos, Options.scrollBounds.size) then
+                Options.scrollDragging = true
+                Options.scrollDragStartY = mPos.Y
+                Options.scrollDragStartOff = Options.scrollOffset
+            end
+        end
+        
+        if Options.scrollDragging and Options.scrollBounds and Options.scrollBounds.maxScroll then
+            local delta = mPos.Y - Options.scrollDragStartY
+            local scrollbarH = Options.scrollBounds.size.Y
+            local thumbH = Options.scrollBounds.thumbH
+            local scrollRange = scrollbarH - thumbH
+            if scrollRange > 0 then
+                local scrollDeltaVal = (delta / scrollRange) * Options.scrollBounds.maxScroll
+                Options.scrollOffset = math.clamp(Options.scrollDragStartOff + scrollDeltaVal, 0, Options.scrollBounds.maxScroll)
+                Options.targetScroll = Options.scrollOffset
+                Options.needsRedraw = true
+            end
         end
         
         if mClick and not Options.dragging then
@@ -3383,39 +3371,3 @@ RunService.Render:Connect(function()
     updateInput()
     updateRender()
 end)
-
--- Fling runs on PostLocal for physics
-RunService.PostLocal:Connect(function()
-    updateFling()
-end)
-
--- ============================================
--- CLEANUP
--- ============================================
-local function cleanup()
-    clearBar()
-    clearOptions()
-    clearKeybindsGui()
-    clearServerInfo()
-    clearStatusBar()
-    clearCommandPanelDrawing()
-    
-    for _, el in State.introElements do
-        pcall(function() el:Remove() end)
-    end
-    State.introElements = {}
-end
-
--- Add unload command
-table.insert(commands, {
-    name = "unload", 
-    desc = "Unload Severe Admin", 
-    usage = ";unload", 
-    cat = "Utility", 
-    fn = function() 
-        cleanup()
-        notify("Severe Admin unloaded")
-    end
-})
-
-table.insert(commandsForPanel, {name = "unload", desc = "Unload Severe Admin", cat = "ETC"})
