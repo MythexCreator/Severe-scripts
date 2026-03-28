@@ -15,6 +15,7 @@ local tostring = tostring
 local tonumber = tonumber
 local pcall = pcall
 local type = type
+local bit32 = bit32
 
 -- ============================================
 -- SERVICES
@@ -22,8 +23,8 @@ local type = type
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
 
--- Get LocalPlayer safely
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
     for _, player in Players:GetChildren() do
@@ -33,6 +34,24 @@ if not LocalPlayer then
         end
     end
 end
+
+-- ============================================
+-- OFFSETS
+-- ============================================
+local Offsets = {
+    FOV = 0x160,
+    Health = 0x194,
+    MaxHealth = 0x1B4,
+    WalkSpeed = 0x1D4,
+    JumpPower = 0x1B0,
+    Gravity = 0x1D0,
+    WorkspaceToWorld = 0x3E0,
+    ProximityPromptHoldDuration = 0x140,
+    Velocity = 0xF0,
+    CFrame = 0xC0,
+    Position = 0xE4,
+    Primitive = 0x148,
+}
 
 -- ============================================
 -- HELPER FUNCTIONS
@@ -87,6 +106,11 @@ local Theme = {
 local Settings = {
     commandBarKey = "semicolon",
     scrollSpeed = 12,
+    statusBarEnabled = true,
+    statusBarCorner = "top-left",
+    statusBarOrientation = "horizontal",
+    hideUsername = false,
+    watermarkEnabled = true,
 }
 
 -- ============================================
@@ -98,6 +122,7 @@ local State = {
     introElements = {},
     cachedSpawnLocation = nil,
     spawnLocationCached = false,
+    spawnLocationCaching = false,
 }
 
 local Features = {
@@ -107,22 +132,23 @@ local Features = {
     fovEnabled = false,
     currentFovValue = nil,
     defaultFov = 70,
+    lastFovWritten = nil,
+    fovWriteCounter = 0,
     antiVoidEnabled = false,
     antiVoidCooldown = 0,
     voidThreshold = -150,
     specPlayer = nil,
     specTimer = 0,
-    
-    -- Third Person
     thirdPersonEnabled = false,
     thirdPersonDistance = 10,
     thirdPersonHeight = 2,
+    instantInteractEnabled = false,
+    clickTpEnabled = false,
 }
 
 local Teleport = {
     target = nil,
     frames = 0,
-    savedPositions = {},
 }
 
 local DiedTp = {
@@ -131,6 +157,7 @@ local DiedTp = {
     lastPos = nil,
     deathPos = nil,
     wasDead = false,
+    wasAliveLastFrame = true,
     cooldown = 0,
 }
 
@@ -138,30 +165,26 @@ local Spawnpoint = {
     enabled = false,
     position = nil,
     cframe = nil,
-    lastCharacter = nil,
-    lastCharacterName = nil,
-    lastRootPart = nil,
-    lastHealth = 100,
-    lastMaxHealth = 100,
-    wasAlive = true,
-    lastPosition = nil,
-    teleportCooldown = 0,
-    justTeleported = false,
-    framesSinceRespawn = 0,
+    wasDead = false,
+    wasAliveLastFrame = true,
+    cooldown = 0,
+    lastPos = nil,
 }
 
 local Gravity = {
     worldPtr = nil,
-    offset = 0x1D0,
-    workspaceToWorldOffset = 0x3E0,
+    offset = Offsets.Gravity,
+    workspaceToWorldOffset = Offsets.WorkspaceToWorld,
     default = 196.2,
 }
 
 local Keybinds = {
     binds = {},
+    activeHolds = {},
     settingFor = nil,
     settingCommandBarKey = false,
     previousKey = nil,
+    modes = {},
 }
 
 local bindableCommands = {
@@ -177,9 +200,492 @@ local bindableCommands = {
     keybinds = true,
     serverinfo = true,
     thirdperson = true,
+    instantinteract = true,
+    clicktp = true,
+    fov = true,
 }
 
 local toggleFeatures = {}
+
+-- ============================================
+-- ADVANCED TELEPORT BYPASS
+-- ============================================
+local TeleportBypass = {
+    queue = {},
+    active = false,
+    currentTarget = nil,
+    attempts = 0,
+    maxAttempts = 15,
+    lastTeleportTime = 0,
+    cooldown = 0.05,
+}
+
+local function bypassTeleport(targetPos, instant)
+    local char = LocalPlayer.Character
+    if not char then return false end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root or not root:IsA("BasePart") then return false end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    
+    local success = false
+    
+    -- Method 1: Direct memory write to primitive (strongest bypass)
+    pcall(function()
+        local primitive = memory.readu64(root, Offsets.Primitive)
+        if primitive and primitive ~= 0 then
+            memory.writevector(primitive, Offsets.Position, targetPos)
+            success = true
+        end
+    end)
+    
+    -- Method 2: CFrame write
+    pcall(function()
+        root.CFrame = CFrame.new(targetPos)
+    end)
+    
+    -- Method 3: Velocity reset (prevents rubber-banding)
+    pcall(function()
+        root.Velocity = Vector3.new(0, 0, 0)
+        memory.writevector(root, Offsets.Velocity, Vector3.new(0, 0, 0))
+    end)
+    
+    -- Method 4: Force humanoid state to prevent stun
+    if hum then
+        pcall(function()
+            hum:ChangeState(Enum.HumanoidStateType.Running)
+        end)
+        pcall(function()
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+            task.defer(function()
+                if hum and hum.Parent then
+                    hum:ChangeState(Enum.HumanoidStateType.Running)
+                end
+            end)
+        end)
+    end
+    
+    return success
+end
+
+local function queueTeleport(targetPos)
+    TeleportBypass.currentTarget = targetPos
+    TeleportBypass.attempts = 0
+    TeleportBypass.active = true
+    TeleportBypass.lastTeleportTime = os_clock()
+end
+
+local function updateTeleportBypass()
+    if not TeleportBypass.active or not TeleportBypass.currentTarget then return end
+    
+    local now = os_clock()
+    if now - TeleportBypass.lastTeleportTime < TeleportBypass.cooldown then return end
+    
+    TeleportBypass.attempts = TeleportBypass.attempts + 1
+    TeleportBypass.lastTeleportTime = now
+    
+    local char = LocalPlayer.Character
+    if not char then 
+        TeleportBypass.active = false
+        return 
+    end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then 
+        TeleportBypass.active = false
+        return 
+    end
+    
+    bypassTeleport(TeleportBypass.currentTarget, true)
+    
+    -- Check if we're close enough to target
+    local dist = distance(root.Position, TeleportBypass.currentTarget)
+    if dist < 5 or TeleportBypass.attempts >= TeleportBypass.maxAttempts then
+        TeleportBypass.active = false
+        TeleportBypass.currentTarget = nil
+    end
+end
+
+-- ============================================
+-- WATERMARK SYSTEM (FIXED)
+-- ============================================
+local Watermark = {
+    elements = {},
+    visible = false,
+    opacity = 0,
+    targetOpacity = 0,
+    fadeSpeed = 2,
+}
+
+local function clearWatermark()
+    for _, el in Watermark.elements do pcall(function() el:Remove() end) end
+    Watermark.elements = {}
+end
+
+local function createWatermark()
+    clearWatermark()
+    
+    if not Settings.watermarkEnabled then return end
+    
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    
+    local vw = cam.ViewportSize.X
+    local els = Watermark.elements
+    
+    local baseX = vw - 175
+    local baseY = 15
+    local W = 160
+    local H = 36
+    
+    -- Glow effect (multiple layers)
+    for i = 3, 1, -1 do
+        local glow = Drawing.new("Square")
+        glow.Visible = true
+        glow.Filled = true
+        glow.Color = Theme.Accent
+        glow.Opacity = 0
+        glow.Rounding = 8 + i * 2
+        glow.Position = Vector2.new(baseX - i * 3, baseY - i * 2)
+        glow.Size = Vector2.new(W + i * 6, H + i * 4)
+        table.insert(els, {obj = glow, type = "glow", layer = i})
+    end
+    
+    -- Main background
+    local bg = Drawing.new("Square")
+    bg.Visible = true
+    bg.Filled = true
+    bg.Color = Theme.Primary
+    bg.Opacity = 0
+    bg.Rounding = 8
+    bg.Position = Vector2.new(baseX, baseY)
+    bg.Size = Vector2.new(W, H)
+    table.insert(els, {obj = bg, type = "bg"})
+    
+    -- Border
+    local border = Drawing.new("Square")
+    border.Visible = true
+    border.Filled = false
+    border.Color = Theme.Accent
+    border.Opacity = 0
+    border.Rounding = 8
+    border.Thickness = 2
+    border.Position = Vector2.new(baseX, baseY)
+    border.Size = Vector2.new(W, H)
+    table.insert(els, {obj = border, type = "border"})
+    
+    -- Logo circle
+    local logoCircle = Drawing.new("Circle")
+    logoCircle.Visible = true
+    logoCircle.Filled = false
+    logoCircle.Color = Theme.Accent
+    logoCircle.Opacity = 0
+    logoCircle.NumSides = 24
+    logoCircle.Thickness = 2
+    logoCircle.Position = Vector2.new(baseX + 20, baseY + H / 2)
+    logoCircle.Radius = 11
+    table.insert(els, {obj = logoCircle, type = "logo"})
+    
+    -- Logo letter
+    local logoLetter = Drawing.new("Text")
+    logoLetter.Visible = true
+    logoLetter.Text = "S"
+    logoLetter.Size = 13
+    logoLetter.Color = Theme.Accent
+    logoLetter.Opacity = 0
+    logoLetter.Outline = true
+    logoLetter.Center = true
+    logoLetter.Position = Vector2.new(baseX + 20, baseY + H / 2 - 7)
+    table.insert(els, {obj = logoLetter, type = "text"})
+    
+    -- Title
+    local title = Drawing.new("Text")
+    title.Visible = true
+    title.Text = "SEVERE"
+    title.Size = 14
+    title.Color = Theme.TextPrimary
+    title.Opacity = 0
+    title.Outline = true
+    title.Position = Vector2.new(baseX + 38, baseY + 5)
+    table.insert(els, {obj = title, type = "text"})
+    
+    -- Version
+    local version = Drawing.new("Text")
+    version.Visible = true
+    version.Text = "v3.0"
+    version.Size = 10
+    version.Color = Theme.Accent
+    version.Opacity = 0
+    version.Outline = true
+    version.Position = Vector2.new(baseX + 95, baseY + 7)
+    table.insert(els, {obj = version, type = "text"})
+    
+    -- FPS counter
+    local fps = Drawing.new("Text")
+    fps.Visible = true
+    fps.Text = "-- FPS"
+    fps.Size = 10
+    fps.Color = Theme.TextSecondary
+    fps.Opacity = 0
+    fps.Outline = true
+    fps.Position = Vector2.new(baseX + 38, baseY + 20)
+    table.insert(els, {obj = fps, type = "fps"})
+    
+    -- Ping
+    local ping = Drawing.new("Text")
+    ping.Visible = true
+    ping.Text = "-- ms"
+    ping.Size = 10
+    ping.Color = Theme.TextSecondary
+    ping.Opacity = 0
+    ping.Outline = true
+    ping.Position = Vector2.new(baseX + 95, baseY + 20)
+    table.insert(els, {obj = ping, type = "ping"})
+    
+    Watermark.visible = true
+end
+
+local function updateWatermark(dt)
+    if not State.introComplete then return end
+    
+    if Settings.watermarkEnabled then
+        Watermark.targetOpacity = 1
+        if #Watermark.elements == 0 then
+            createWatermark()
+        end
+    else
+        Watermark.targetOpacity = 0
+    end
+    
+    -- Smooth fade
+    local diff = Watermark.targetOpacity - Watermark.opacity
+    if math.abs(diff) > 0.01 then
+        Watermark.opacity = Watermark.opacity + diff * math.min(1, dt * Watermark.fadeSpeed)
+    else
+        Watermark.opacity = Watermark.targetOpacity
+    end
+    
+    -- Update elements
+    local fpsVal = get_overlay_fps and get_overlay_fps() or 0
+    local pingVal = game.GetPing and game:GetPing() or 0
+    
+    for _, item in Watermark.elements do
+        local el = item.obj
+        if item.type == "glow" then
+            el.Opacity = Watermark.opacity * 0.08 / item.layer
+        elseif item.type == "bg" then
+            el.Opacity = Watermark.opacity * 0.95
+        elseif item.type == "border" or item.type == "logo" then
+            el.Opacity = Watermark.opacity
+        elseif item.type == "text" then
+            el.Opacity = Watermark.opacity
+        elseif item.type == "fps" then
+            el.Text = tostring(math.floor(fpsVal)) .. " FPS"
+            el.Opacity = Watermark.opacity
+        elseif item.type == "ping" then
+            el.Text = tostring(math.floor(pingVal)) .. " ms"
+            el.Opacity = Watermark.opacity
+        end
+    end
+    
+    -- Hide if opacity is 0
+    if Watermark.opacity <= 0.01 and #Watermark.elements > 0 then
+        clearWatermark()
+    end
+end
+
+-- ============================================
+-- CLICKTP SYSTEM (FIXED)
+-- ============================================
+local ClickTP = {
+    VERTICAL_OFFSET = 3,
+    GROUND_CHECK_OFFSET = 5,
+    RENDER_DISTANCE_SQ = 500 * 500,
+    CACHE_REFRESH_INTERVAL = 0.3,
+    RAY_PARALLEL_EPSILON = 1e-5,
+    DISTANCE_MIN_EPSILON = 1e-10,
+    ANCESTOR_LIMIT = 4,
+    
+    OBBCache = {},
+    OBBCount = 0,
+    CharacterRoots = {},
+    LastCacheTime = 0,
+}
+
+local function IsCharacterDescendant(instance)
+    local current = instance.Parent
+    for _ = 1, ClickTP.ANCESTOR_LIMIT do
+        if current == nil or current == workspace then return false end
+        if ClickTP.CharacterRoots[current] then return true end
+        current = current.Parent
+    end
+    return false
+end
+
+local function RefreshClickTPCache()
+    table.clear(ClickTP.CharacterRoots)
+    for _, obj in Players:GetChildren() do
+        if obj.ClassName ~= "Player" then continue end
+        local char = obj.Character
+        if char ~= nil then ClickTP.CharacterRoots[char] = true end
+    end
+
+    local camera = workspace.CurrentCamera
+    if camera == nil then return end
+    local camPos = camera.Position
+    local cx, cy, cz = camPos.X, camPos.Y, camPos.Z
+    local cache = ClickTP.OBBCache
+    local count = 0
+
+    local validClasses = {Part = true, MeshPart = true, UnionOperation = true, WedgePart = true, CornerWedgePart = true, TrussPart = true, SpawnLocation = true}
+
+    for _, inst in workspace:GetDescendants() do
+        if not validClasses[inst.ClassName] or inst.Parent == nil or IsCharacterDescendant(inst) then continue end
+        if inst.Transparency >= 1 then continue end
+        
+        local part = inst
+        local cf = part.CFrame
+        local pos = cf.Position
+        local dx, dy, dz = pos.X - cx, pos.Y - cy, pos.Z - cz
+        if dx * dx + dy * dy + dz * dz > ClickTP.RENDER_DISTANCE_SQ then continue end
+        local size = part.Size
+        local hx, hy, hz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+        local r, u, l = cf.RightVector, cf.UpVector, cf.LookVector
+        count = count + 1
+        local entry = cache[count]
+        if entry ~= nil then
+            entry.PX = pos.X ; entry.PY = pos.Y ; entry.PZ = pos.Z
+            entry.RX = r.X   ; entry.RY = r.Y   ; entry.RZ = r.Z   ; entry.HX = hx
+            entry.UX = u.X   ; entry.UY = u.Y   ; entry.UZ = u.Z   ; entry.HY = hy
+            entry.FX = -l.X  ; entry.FY = -l.Y  ; entry.FZ = -l.Z  ; entry.HZ = hz
+            entry.BSR = hx * hx + hy * hy + hz * hz
+            entry.TopY = pos.Y + hy
+        else
+            cache[count] = {
+                PX = pos.X, PY = pos.Y, PZ = pos.Z,
+                RX = r.X,   RY = r.Y,   RZ = r.Z,   HX = hx,
+                UX = u.X,   UY = u.Y,   UZ = u.Z,   HY = hy,
+                FX = -l.X,  FY = -l.Y,  FZ = -l.Z,  HZ = hz,
+                BSR = hx * hx + hy * hy + hz * hz,
+                TopY = pos.Y + hy,
+            }
+        end
+    end
+
+    for i = count + 1, #cache do cache[i] = nil end
+    ClickTP.OBBCount = count
+end
+
+local function RayOBB(ox, oy, oz, dx, dy, dz, e)
+    local ex, ey, ez = e.PX - ox, e.PY - oy, e.PZ - oz
+    local tMin, tMax = -math.huge, math.huge
+    local proj, dot, near, far, half
+
+    proj = e.RX * ex + e.RY * ey + e.RZ * ez
+    dot  = e.RX * dx + e.RY * dy + e.RZ * dz
+    half = e.HX
+    if dot > ClickTP.RAY_PARALLEL_EPSILON or dot < -ClickTP.RAY_PARALLEL_EPSILON then
+        near = (proj + half) / dot ; far = (proj - half) / dot
+        if near > far then near, far = far, near end
+        if near > tMin then tMin = near end
+        if far  < tMax then tMax = far  end
+        if tMin > tMax or tMax < ClickTP.RAY_PARALLEL_EPSILON then return nil end
+    elseif -proj - half > 0 or -proj + half < 0 then return nil end
+
+    proj = e.UX * ex + e.UY * ey + e.UZ * ez
+    dot  = e.UX * dx + e.UY * dy + e.UZ * dz
+    half = e.HY
+    if dot > ClickTP.RAY_PARALLEL_EPSILON or dot < -ClickTP.RAY_PARALLEL_EPSILON then
+        near = (proj + half) / dot ; far = (proj - half) / dot
+        if near > far then near, far = far, near end
+        if near > tMin then tMin = near end
+        if far  < tMax then tMax = far  end
+        if tMin > tMax or tMax < ClickTP.RAY_PARALLEL_EPSILON then return nil end
+    elseif -proj - half > 0 or -proj + half < 0 then return nil end
+
+    proj = e.FX * ex + e.FY * ey + e.FZ * ez
+    dot  = e.FX * dx + e.FY * dy + e.FZ * dz
+    half = e.HZ
+    if dot > ClickTP.RAY_PARALLEL_EPSILON or dot < -ClickTP.RAY_PARALLEL_EPSILON then
+        near = (proj + half) / dot ; far = (proj - half) / dot
+        if near > far then near, far = far, near end
+        if near > tMin then tMin = near end
+        if far  < tMax then tMax = far  end
+        if tMin > tMax or tMax < ClickTP.RAY_PARALLEL_EPSILON then return nil end
+    elseif -proj - half > 0 or -proj + half < 0 then return nil end
+
+    return tMin >= 0 and tMin or 0
+end
+
+local function GetMouseRay(camera, mouse)
+    local vp   = camera.ViewportSize
+    local half = math.tan(math.rad(camera.FieldOfView * 0.5))
+    local asp  = vp.X / vp.Y
+    local nx   = (mouse.X / vp.X) * 2 - 1
+    local ny   = 1 - (mouse.Y / vp.Y) * 2
+    local sx   = nx * asp * half
+    local sy   = ny * half
+    local r, u, l = camera.RightVector, camera.UpVector, camera.LookVector
+    local rx = r.X * sx + u.X * sy + l.X
+    local ry = r.Y * sx + u.Y * sy + l.Y
+    local rz = r.Z * sx + u.Z * sy + l.Z
+    local mag = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if mag < ClickTP.DISTANCE_MIN_EPSILON then return 0, 0, 1 end
+    return rx / mag, ry / mag, rz / mag
+end
+
+local function PerformClickTPRaycast()
+    local character = LocalPlayer.Character
+    if not character then return nil end
+    
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then rootPart = character.PrimaryPart end
+    if not rootPart or not rootPart:IsA("BasePart") then return nil end
+
+    local camera = workspace.CurrentCamera
+    if camera == nil then return nil end
+
+    local camPos = camera.Position
+    local ox, oy, oz = camPos.X, camPos.Y, camPos.Z
+    
+    local mousePos = UserInputService:GetMouseLocation()
+    local rdx, rdy, rdz = GetMouseRay(camera, mousePos)
+    
+    local best = math.huge
+    local bestEntry = nil
+    local cache = ClickTP.OBBCache
+    local count = ClickTP.OBBCount
+
+    for i = 1, count do
+        local e = cache[i]
+        local bx = e.PX - ox
+        local by = e.PY - oy
+        local bz = e.PZ - oz
+        local cp = bx * rdx + by * rdy + bz * rdz
+        if bx * bx + by * by + bz * bz - cp * cp > e.BSR then continue end
+        local t = RayOBB(ox, oy, oz, rdx, rdy, rdz, e)
+        if t ~= nil and t < best then 
+            best = t 
+            bestEntry = e
+        end
+    end
+
+    if best == math.huge then return nil end
+
+    local hitX = ox + rdx * best
+    local hitY = oy + rdy * best
+    local hitZ = oz + rdz * best
+    
+    local finalY
+    if bestEntry then
+        finalY = bestEntry.TopY + ClickTP.VERTICAL_OFFSET
+    else
+        finalY = hitY + ClickTP.VERTICAL_OFFSET
+    end
+
+    return Vector3.new(hitX, finalY, hitZ)
+end
 
 -- ============================================
 -- GUI STATE TABLES
@@ -199,7 +705,7 @@ local CommandPanelDrawing = {
     elements = {},
     itemBounds = {},
     categoryBounds = {},
-    searchBounds = {},
+    searchBounds = nil,
     closeBounds = {},
     headerBounds = {},
     scrollOffset = 0,
@@ -212,6 +718,7 @@ local CommandPanelDrawing = {
     contentBounds = {},
     W = 700,
     H = 480,
+    needsRedraw = true,
 }
 
 local Bar = {
@@ -254,7 +761,7 @@ local Options = {
     filteredCache = {},
     lastSearchQuery = "",
     themeTab = "accent",
-    W = 620, H = 520, HEADER = 52, TAB_H = 38, PAD = 14, ITEM_H = 58, VISIBLE = 5, SEARCH_H = 38, FOOTER_H = 32,
+    W = 620, H = 580, HEADER = 52, TAB_H = 38, PAD = 14, ITEM_H = 62, VISIBLE = 5, SEARCH_H = 38, FOOTER_H = 32,
 }
 
 local KeybindsGui = {
@@ -267,6 +774,7 @@ local KeybindsGui = {
     headerBounds = {pos = Vector2.new(0,0), size = Vector2.new(0,0)},
     itemBounds = {},
     W = 260, HEADER = 38,
+    needsRedraw = true,
 }
 
 local ServerInfo = {
@@ -283,24 +791,31 @@ local StatusBar = {
 local Input = {
     lastKeys = {},
     lastMouse = false,
+    lastRightMouse = false,
     heldKeys = {},
     KEY_INITIAL_DELAY = 0.4,
     KEY_REPEAT_RATE = 0.033,
     lastScrollTime = 0,
+    ctrlHeld = false,
+    currentKeys = {},
+}
+
+local ProximityPromptCache = {
+    prompts = {},
+    lastScan = 0,
+    scanInterval = 3,
 }
 
 -- ============================================
--- THEME PRESETS (ROZSZERZONE)
+-- THEME PRESETS
 -- ============================================
 local accentPresets = {
-    -- Oryginalne
     {name = "Gold", accent = Color3.fromRGB(255, 196, 0), light = Color3.fromRGB(255, 215, 70), dark = Color3.fromRGB(200, 155, 0)},
     {name = "Indigo", accent = Color3.fromRGB(99, 102, 241), light = Color3.fromRGB(139, 142, 255), dark = Color3.fromRGB(79, 82, 200)},
     {name = "Emerald", accent = Color3.fromRGB(16, 185, 129), light = Color3.fromRGB(52, 211, 153), dark = Color3.fromRGB(5, 150, 105)},
     {name = "Rose", accent = Color3.fromRGB(244, 63, 94), light = Color3.fromRGB(251, 113, 133), dark = Color3.fromRGB(225, 29, 72)},
     {name = "Cyan", accent = Color3.fromRGB(6, 182, 212), light = Color3.fromRGB(34, 211, 238), dark = Color3.fromRGB(8, 145, 178)},
     {name = "Purple", accent = Color3.fromRGB(168, 85, 247), light = Color3.fromRGB(192, 132, 252), dark = Color3.fromRGB(147, 51, 234)},
-    -- Nowe
     {name = "Red", accent = Color3.fromRGB(239, 68, 68), light = Color3.fromRGB(248, 113, 113), dark = Color3.fromRGB(220, 38, 38)},
     {name = "Blue", accent = Color3.fromRGB(59, 130, 246), light = Color3.fromRGB(96, 165, 250), dark = Color3.fromRGB(37, 99, 235)},
     {name = "Green", accent = Color3.fromRGB(34, 197, 94), light = Color3.fromRGB(74, 222, 128), dark = Color3.fromRGB(22, 163, 74)},
@@ -322,14 +837,12 @@ local accentPresets = {
 }
 
 local fillPresets = {
-    -- Oryginalne
     {name = "Dark", primary = Color3.fromRGB(10, 10, 14), secondary = Color3.fromRGB(18, 18, 24), tertiary = Color3.fromRGB(28, 28, 36), card = Color3.fromRGB(22, 22, 30), border = Color3.fromRGB(40, 40, 50)},
     {name = "Darker", primary = Color3.fromRGB(5, 5, 8), secondary = Color3.fromRGB(12, 12, 16), tertiary = Color3.fromRGB(20, 20, 26), card = Color3.fromRGB(15, 15, 20), border = Color3.fromRGB(30, 30, 40)},
     {name = "Midnight", primary = Color3.fromRGB(8, 8, 18), secondary = Color3.fromRGB(14, 14, 28), tertiary = Color3.fromRGB(22, 22, 40), card = Color3.fromRGB(18, 18, 34), border = Color3.fromRGB(35, 35, 55)},
     {name = "Navy", primary = Color3.fromRGB(10, 15, 25), secondary = Color3.fromRGB(15, 22, 35), tertiary = Color3.fromRGB(22, 32, 48), card = Color3.fromRGB(18, 26, 40), border = Color3.fromRGB(35, 45, 60)},
     {name = "Charcoal", primary = Color3.fromRGB(18, 18, 18), secondary = Color3.fromRGB(28, 28, 28), tertiary = Color3.fromRGB(38, 38, 38), card = Color3.fromRGB(32, 32, 32), border = Color3.fromRGB(50, 50, 50)},
     {name = "Slate", primary = Color3.fromRGB(15, 20, 25), secondary = Color3.fromRGB(25, 32, 38), tertiary = Color3.fromRGB(35, 44, 52), card = Color3.fromRGB(28, 36, 44), border = Color3.fromRGB(50, 60, 70)},
-    -- Nowe
     {name = "Wine", primary = Color3.fromRGB(18, 8, 12), secondary = Color3.fromRGB(28, 14, 20), tertiary = Color3.fromRGB(40, 22, 30), card = Color3.fromRGB(32, 16, 24), border = Color3.fromRGB(55, 30, 40)},
     {name = "Forest", primary = Color3.fromRGB(8, 14, 10), secondary = Color3.fromRGB(14, 22, 16), tertiary = Color3.fromRGB(22, 34, 26), card = Color3.fromRGB(16, 26, 20), border = Color3.fromRGB(35, 50, 40)},
     {name = "Ocean", primary = Color3.fromRGB(8, 12, 18), secondary = Color3.fromRGB(12, 20, 30), tertiary = Color3.fromRGB(18, 30, 44), card = Color3.fromRGB(14, 24, 36), border = Color3.fromRGB(30, 45, 60)},
@@ -374,6 +887,7 @@ local commandsForPanel = {
     {name = "view [player]", desc = "Watch a player", cat = "VISUALS"},
     {name = "unview", desc = "Stop viewing", cat = "VISUALS"},
     {name = "fov [num]", desc = "Set camera FOV", cat = "VISUALS"},
+    {name = "unfov", desc = "Reset FOV to default", cat = "VISUALS"},
     {name = "thirdperson", desc = "Force third person view", cat = "VISUALS"},
     {name = "unthirdperson", desc = "Disable third person", cat = "VISUALS"},
     {name = "tp [player]", desc = "Teleport to player", cat = "TELEPORT"},
@@ -381,15 +895,18 @@ local commandsForPanel = {
     {name = "spawn", desc = "Go to game spawn", cat = "TELEPORT"},
     {name = "spawnpoint", desc = "Set respawn position", cat = "TELEPORT"},
     {name = "unspawnpoint", desc = "Clear respawn position", cat = "TELEPORT"},
-    {name = "savepos [1-9]", desc = "Save current position", cat = "TELEPORT"},
-    {name = "loadpos [1-9]", desc = "Load saved position", cat = "TELEPORT"},
     {name = "diedtp", desc = "Auto return to death location", cat = "TELEPORT"},
     {name = "undiedtp", desc = "Disable death return", cat = "TELEPORT"},
+    {name = "clicktp", desc = "Click to teleport (bind key)", cat = "TELEPORT"},
+    {name = "unclicktp", desc = "Disable click teleport", cat = "TELEPORT"},
     {name = "gravity [num]", desc = "Set world gravity", cat = "FUN"},
+    {name = "ungravity", desc = "Reset gravity to default", cat = "FUN"},
     {name = "antivoid", desc = "Teleport to spawn when falling", cat = "ETC"},
     {name = "unantivoid", desc = "Disable anti-void", cat = "ETC"},
     {name = "forcereset", desc = "Force kill (bypass reset locks)", cat = "ETC"},
     {name = "userid [player]", desc = "Copy player's UserId", cat = "ETC"},
+    {name = "instantinteract", desc = "Instant ProximityPrompt", cat = "ETC"},
+    {name = "uninstantinteract", desc = "Disable instant interact", cat = "ETC"},
     {name = "serverinfo", desc = "Show server information", cat = "ETC"},
     {name = "cmds", desc = "Open command panel", cat = "ETC"},
     {name = "options", desc = "Open settings panel", cat = "ETC"},
@@ -405,6 +922,7 @@ local function notify(msg)
 end
 
 local function inRect(p, pos, size)
+    if not pos or not size then return false end
     return p.X >= pos.X and p.X <= pos.X + size.X and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
 end
 
@@ -437,24 +955,35 @@ local function formatKeyName(key)
 end
 
 local function cacheSpawnLocation()
-    if State.spawnLocationCached then return end
-    pcall(function()
-        for _, obj in workspace:GetDescendants() do
-            if obj.ClassName == "SpawnLocation" then
-                State.cachedSpawnLocation = obj.Position + Vector3.new(0, 3, 0)
-                State.spawnLocationCached = true
-                return
+    if State.spawnLocationCached or State.spawnLocationCaching then return end
+    State.spawnLocationCaching = true
+    
+    task.spawn(function()
+        local found = false
+        pcall(function()
+            for _, obj in workspace:GetDescendants() do
+                if found then return end
+                if obj.ClassName == "SpawnLocation" then
+                    State.cachedSpawnLocation = obj.Position + Vector3.new(0, 3, 0)
+                    State.spawnLocationCached = true
+                    found = true
+                end
             end
+        end)
+        
+        if not found then
+            State.cachedSpawnLocation = Vector3.new(0, 50, 0)
+            State.spawnLocationCached = true
         end
+        State.spawnLocationCaching = false
     end)
-    if not State.cachedSpawnLocation then
-        State.cachedSpawnLocation = Vector3.new(0, 50, 0)
-        State.spawnLocationCached = true
-    end
 end
 
 local function getSpawnLocation()
-    if not State.spawnLocationCached then cacheSpawnLocation() end
+    if not State.spawnLocationCached then 
+        cacheSpawnLocation() 
+        return Vector3.new(0, 50, 0)
+    end
     return State.cachedSpawnLocation or Vector3.new(0, 50, 0)
 end
 
@@ -519,52 +1048,126 @@ local function parseCommandForPlayerArg(input)
 end
 
 local function getKeybindForCommand(cmdName)
-    for key, cmd in Keybinds.binds do
-        if cmd == cmdName then return key end
+    for key, data in Keybinds.binds do
+        if type(data) == "table" and data.cmd == cmdName then 
+            return key, data.mode or Keybinds.modes[cmdName] or "toggle"
+        elseif type(data) == "string" and data == cmdName then
+            return key, Keybinds.modes[cmdName] or "toggle"
+        end
     end
-    return nil
+    return nil, Keybinds.modes[cmdName] or "toggle"
+end
+
+local function getModeForCommand(cmdName)
+    return Keybinds.modes[cmdName] or "toggle"
+end
+
+local function setModeForCommand(cmdName, mode)
+    Keybinds.modes[cmdName] = mode
+    for key, data in Keybinds.binds do
+        local cmd = type(data) == "table" and data.cmd or data
+        if cmd == cmdName then
+            Keybinds.binds[key] = {cmd = cmdName, mode = mode}
+            return true
+        end
+    end
+    return true
 end
 
 local function setKeybind(key, cmdName)
-    for k, c in Keybinds.binds do
-        if c == cmdName then Keybinds.binds[k] = nil break end
+    local mode = Keybinds.modes[cmdName] or "toggle"
+    for k, data in Keybinds.binds do
+        local cmd = type(data) == "table" and data.cmd or data
+        if cmd == cmdName then 
+            Keybinds.binds[k] = nil 
+            break 
+        end
     end
-    Keybinds.binds[key] = cmdName
+    Keybinds.binds[key] = {cmd = cmdName, mode = mode}
 end
 
 local function removeKeybind(cmdName)
-    for key, cmd in Keybinds.binds do
-        if cmd == cmdName then Keybinds.binds[key] = nil return end
+    for key, data in Keybinds.binds do
+        local cmd = type(data) == "table" and data.cmd or data
+        if cmd == cmdName then 
+            Keybinds.binds[key] = nil 
+            return true
+        end
     end
+    return false
+end
+
+local function isKeyDown(keyToCheck)
+    for _, key in Input.currentKeys do
+        if string.lower(key) == string.lower(keyToCheck) then
+            return true
+        end
+    end
+    return false
 end
 
 local function getActiveFeatures()
     local features = {}
     if Features.noclipEnabled then
-        table.insert(features, {name = "Noclip", cmd = "noclip", key = getKeybindForCommand("noclip"), color = Theme.Movement})
+        local key, mode = getKeybindForCommand("noclip")
+        table.insert(features, {name = "Noclip", cmd = "noclip", key = key, mode = mode, color = Theme.Movement})
     end
     if Features.infJumpEnabled then
-        table.insert(features, {name = "Infinite Jump", cmd = "infjump", key = getKeybindForCommand("infjump"), color = Theme.Movement})
+        local key, mode = getKeybindForCommand("infjump")
+        table.insert(features, {name = "Infinite Jump", cmd = "infjump", key = key, mode = mode, color = Theme.Movement})
     end
     if Features.fovEnabled and Features.currentFovValue then
-        table.insert(features, {name = "FOV: " .. Features.currentFovValue, cmd = "fov", key = getKeybindForCommand("fov"), color = Theme.Visual})
+        local key, mode = getKeybindForCommand("fov")
+        table.insert(features, {name = "FOV: " .. Features.currentFovValue, cmd = "fov", key = key, mode = mode, color = Theme.Visual})
     end
     if Features.thirdPersonEnabled then
-        table.insert(features, {name = "Third Person", cmd = "thirdperson", key = getKeybindForCommand("thirdperson"), color = Theme.Visual})
+        local key, mode = getKeybindForCommand("thirdperson")
+        table.insert(features, {name = "Third Person", cmd = "thirdperson", key = key, mode = mode, color = Theme.Visual})
     end
     if Features.specPlayer then
-        table.insert(features, {name = "Viewing: " .. Features.specPlayer.Name, cmd = "view", key = getKeybindForCommand("view"), color = Theme.Visual})
+        local key, mode = getKeybindForCommand("view")
+        table.insert(features, {name = "Viewing: " .. Features.specPlayer.Name, cmd = "view", key = key, mode = mode, color = Theme.Visual})
     end
     if Spawnpoint.enabled then
-        table.insert(features, {name = "Spawnpoint", cmd = "spawnpoint", key = getKeybindForCommand("spawnpoint"), color = Theme.Teleport})
+        local key, mode = getKeybindForCommand("spawnpoint")
+        table.insert(features, {name = "Spawnpoint", cmd = "spawnpoint", key = key, mode = mode, color = Theme.Teleport})
     end
     if DiedTp.enabled then
-        table.insert(features, {name = "DiedTP", cmd = "diedtp", key = getKeybindForCommand("diedtp"), color = Theme.Teleport})
+        local key, mode = getKeybindForCommand("diedtp")
+        table.insert(features, {name = "DiedTP", cmd = "diedtp", key = key, mode = mode, color = Theme.Teleport})
+    end
+    if Features.clickTpEnabled then
+        local key, mode = getKeybindForCommand("clicktp")
+        local keyText = key and (" [" .. formatKeyName(key) .. "]") or ""
+        table.insert(features, {name = "ClickTP" .. keyText, cmd = "clicktp", key = key, mode = mode, color = Theme.Teleport})
     end
     if Features.antiVoidEnabled then
-        table.insert(features, {name = "Anti-Void", cmd = "antivoid", key = getKeybindForCommand("antivoid"), color = Theme.Utility})
+        local key, mode = getKeybindForCommand("antivoid")
+        table.insert(features, {name = "Anti-Void", cmd = "antivoid", key = key, mode = mode, color = Theme.Utility})
+    end
+    if Features.instantInteractEnabled then
+        local key, mode = getKeybindForCommand("instantinteract")
+        table.insert(features, {name = "Instant Interact", cmd = "instantinteract", key = key, mode = mode, color = Theme.Utility})
     end
     return features
+end
+
+local function applyThemeChange()
+    if CommandPanel.open then 
+        CommandPanelDrawing.needsRedraw = true
+    end
+    if Bar.open then 
+        Bar.needsRedraw = true 
+    end
+    if KeybindsGui.open then 
+        KeybindsGui.needsRedraw = true
+    end
+    if ServerInfo.open then 
+        ServerInfo.drawn = false
+    end
+    Options.needsRedraw = true
+    clearWatermark()
+    createWatermark()
 end
 
 local function createIntro()
@@ -662,8 +1265,13 @@ local function updateIntro()
     elseif elapsed < 2.6 then
         newOpacity = 1 - ((elapsed - 2.2) / 0.4)
     else
-        for _, el in State.introElements do
-            pcall(function() el.Visible = false el:Remove() end)
+        for i = #State.introElements, 1, -1 do
+            local el = State.introElements[i]
+            pcall(function() 
+                el.Visible = false 
+                el:Remove() 
+            end)
+            State.introElements[i] = nil
         end
         State.introElements = {}
         State.introComplete = true
@@ -681,7 +1289,6 @@ task.spawn(function()
     createIntro()
     cacheSpawnLocation()
 end)
-
 -- ============================================
 -- FEATURE FUNCTIONS
 -- ============================================
@@ -694,33 +1301,34 @@ local function tpToPlayer(name)
     if not tChar then notify("Target has no character") return end
     local root = tChar:FindFirstChild("HumanoidRootPart")
     if not root then return end
-    Teleport.target = root.Position + Vector3.new(0, 3, 0)
-    Teleport.frames = 10
+    local targetPos = root.Position + Vector3.new(0, 3, 0)
+    queueTeleport(targetPos)
     notify("Teleporting to " .. target.Name)
 end
 
 local function gotoPos(x, y, z)
-    Teleport.target = Vector3.new(x, y, z)
-    Teleport.frames = 10
+    local targetPos = Vector3.new(x, y, z)
+    queueTeleport(targetPos)
     notify("Teleporting to " .. x .. ", " .. y .. ", " .. z)
 end
 
 local function goToSpawn()
     local char = LocalPlayer.Character
     if not char then notify("No character") return end
-    Teleport.target = getSpawnLocation()
-    Teleport.frames = 10
+    queueTeleport(getSpawnLocation())
     notify("Teleporting to spawn")
 end
 
 local function noclipOn()
     if Features.noclipEnabled then return end
     Features.noclipEnabled = true
+    KeybindsGui.needsRedraw = true
     notify("Noclip enabled")
 end
 
 local function noclipOff()
     Features.noclipEnabled = false
+    KeybindsGui.needsRedraw = true
     notify("Noclip disabled")
 end
 
@@ -738,12 +1346,14 @@ end
 local function infJumpOn()
     if Features.infJumpEnabled then return end
     Features.infJumpEnabled = true
+    KeybindsGui.needsRedraw = true
     notify("Infinite Jump enabled")
 end
 
 local function infJumpOff()
     Features.infJumpEnabled = false
     Features.lastSpaceInf = false
+    KeybindsGui.needsRedraw = true
     notify("Infinite Jump disabled")
 end
 
@@ -754,11 +1364,7 @@ local function updateInfJump()
         if not char then return end
         local root = char:FindFirstChild("HumanoidRootPart")
         if not root then return end
-        local keys = getpressedkeys()
-        local space = false
-        for _, k in keys do
-            if string.find(string.lower(k), "space") then space = true break end
-        end
+        local space = isKeyDown("space")
         if space and not Features.lastSpaceInf then
             local vel = root.Velocity
             root.Velocity = Vector3.new(vel.X, 60, vel.Z)
@@ -770,7 +1376,10 @@ end
 local function writeFovDirect(value)
     pcall(function()
         local cam = workspace.CurrentCamera
-        if cam then memory.writef32(cam, 0x160, math.rad(value)) end
+        if cam then 
+            memory.writef32(cam, Offsets.FOV, math.rad(value))
+            Features.lastFovWritten = value
+        end
     end)
 end
 
@@ -780,30 +1389,39 @@ local function setFov(value)
     num = math.clamp(num, 1, 120)
     Features.currentFovValue = num
     Features.fovEnabled = true
-    for _ = 1, 5 do writeFovDirect(num) end
+    Features.lastFovWritten = nil
+    KeybindsGui.needsRedraw = true
+    writeFovDirect(num)
     notify("FOV set to " .. num)
 end
 
 local function resetFov()
     Features.currentFovValue = nil
     Features.fovEnabled = false
-    for _ = 1, 5 do writeFovDirect(Features.defaultFov) end
+    Features.lastFovWritten = nil
+    KeybindsGui.needsRedraw = true
+    writeFovDirect(Features.defaultFov)
     notify("FOV reset to " .. Features.defaultFov)
 end
 
 local function updateFov()
     if not Features.fovEnabled or not Features.currentFovValue then return end
-    writeFovDirect(Features.currentFovValue)
+    Features.fovWriteCounter = Features.fovWriteCounter + 1
+    if Features.lastFovWritten ~= Features.currentFovValue or Features.fovWriteCounter % 60 == 0 then
+        writeFovDirect(Features.currentFovValue)
+    end
 end
 
 local function thirdPersonOn()
     if Features.thirdPersonEnabled then return end
     Features.thirdPersonEnabled = true
+    KeybindsGui.needsRedraw = true
     notify("Third Person enabled")
 end
 
 local function thirdPersonOff()
     Features.thirdPersonEnabled = false
+    KeybindsGui.needsRedraw = true
     notify("Third Person disabled")
 end
 
@@ -812,16 +1430,12 @@ local function updateThirdPerson()
     pcall(function()
         local char = LocalPlayer.Character
         if not char then return end
-        
         local head = char:FindFirstChild("Head") or char.PrimaryPart
         if not head then return end
-        
         local camera = workspace.CurrentCamera
         if not camera then return end
-        
         local lookDir = camera.LookVector
         local upDir = Vector3.new(0, 1, 0)
-        
         camera.Position = head.Position - (lookDir * Features.thirdPersonDistance) + (upDir * Features.thirdPersonHeight)
     end)
 end
@@ -830,11 +1444,13 @@ local function antiVoidOn()
     if Features.antiVoidEnabled then return end
     Features.antiVoidEnabled = true
     Features.antiVoidCooldown = 0
+    KeybindsGui.needsRedraw = true
     notify("Anti-void enabled")
 end
 
 local function antiVoidOff()
     Features.antiVoidEnabled = false
+    KeybindsGui.needsRedraw = true
     notify("Anti-void disabled")
 end
 
@@ -850,8 +1466,7 @@ local function updateAntiVoid()
         local root = char:FindFirstChild("HumanoidRootPart")
         if not root then return end
         if root.Position.Y < Features.voidThreshold then
-            root.CFrame = CFrame.new(getSpawnLocation())
-            root.Velocity = Vector3.new(0, 0, 0)
+            bypassTeleport(getSpawnLocation(), true)
             Features.antiVoidCooldown = 2
             notify("Anti-void: Teleported to spawn!")
         end
@@ -867,6 +1482,7 @@ local function specOn(name)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then notify("Target has no humanoid") return end
     Features.specPlayer = player
+    KeybindsGui.needsRedraw = true
     pcall(function()
         local cam = workspace.CurrentCamera
         if cam then cam.CameraSubject = hum end
@@ -876,6 +1492,7 @@ end
 
 local function specOff()
     Features.specPlayer = nil
+    KeybindsGui.needsRedraw = true
     pcall(function()
         local cam = workspace.CurrentCamera
         local char = LocalPlayer.Character
@@ -901,7 +1518,9 @@ local function diedTpOn()
     DiedTp.lastPos = nil
     DiedTp.deathPos = nil
     DiedTp.wasDead = false
+    DiedTp.wasAliveLastFrame = true
     DiedTp.cooldown = 0
+    KeybindsGui.needsRedraw = true
     notify("DiedTP enabled")
 end
 
@@ -909,6 +1528,7 @@ local function diedTpOff()
     DiedTp.enabled = false
     DiedTp.deathPos = nil
     DiedTp.wasDead = false
+    KeybindsGui.needsRedraw = true
     notify("DiedTP disabled")
 end
 
@@ -917,49 +1537,63 @@ local function updateDiedTp(dt)
     if DiedTp.cooldown > 0 then DiedTp.cooldown = DiedTp.cooldown - dt return end
     pcall(function()
         local char = LocalPlayer.Character
-        if not char then DiedTp.wasDead = true return end
+        if not char then 
+            DiedTp.wasDead = true 
+            DiedTp.wasAliveLastFrame = false
+            return 
+        end
         local root = char:FindFirstChild("HumanoidRootPart")
-        if not root then DiedTp.wasDead = true return end
+        if not root or not root:IsA("BasePart") then 
+            DiedTp.wasDead = true 
+            DiedTp.wasAliveLastFrame = false
+            return 
+        end
         local hum = char:FindFirstChildOfClass("Humanoid")
         if not hum then return end
+        
         local currentHealth = hum.Health
-        if currentHealth > 0 then DiedTp.lastPos = root.Position end
-        if DiedTp.lastHealth > 0 and currentHealth <= 0 then
-            if DiedTp.lastPos then DiedTp.deathPos = DiedTp.lastPos end
+        local isAliveNow = currentHealth > 0
+        
+        if isAliveNow then 
+            DiedTp.lastPos = root.Position 
+        end
+        
+        if DiedTp.wasAliveLastFrame and not isAliveNow then
+            if DiedTp.lastPos then 
+                DiedTp.deathPos = DiedTp.lastPos 
+            end
             DiedTp.wasDead = true
         end
-        if DiedTp.wasDead and currentHealth > 0 and DiedTp.deathPos then
-            root.CFrame = CFrame.new(DiedTp.deathPos + Vector3.new(0, 3, 0))
-            root.Velocity = Vector3.new(0, 0, 0)
+        
+        if DiedTp.wasDead and isAliveNow and DiedTp.deathPos then
+            bypassTeleport(DiedTp.deathPos + Vector3.new(0, 3, 0), true)
             notify("But it refused.")
             DiedTp.wasDead = false
+            DiedTp.deathPos = nil
             DiedTp.cooldown = 2
         end
+        
         DiedTp.lastHealth = currentHealth
+        DiedTp.wasAliveLastFrame = isAliveNow
     end)
 end
 
+-- Spawnpoint using same logic as DiedTP
 local function setSpawnpoint()
     local char = LocalPlayer.Character
     if not char then notify("No character") return end
     local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then notify("No HumanoidRootPart") return end
-    Spawnpoint.cframe = root.CFrame
+    if not root or not root:IsA("BasePart") then notify("No HumanoidRootPart") return end
+    
     Spawnpoint.position = root.Position + Vector3.new(0, 0.5, 0)
+    Spawnpoint.cframe = root.CFrame
     Spawnpoint.enabled = true
-    Spawnpoint.lastCharacter = char
-    Spawnpoint.lastCharacterName = char.Name
-    Spawnpoint.lastRootPart = root
-    Spawnpoint.lastPosition = root.Position
-    Spawnpoint.teleportCooldown = 0
-    Spawnpoint.justTeleported = false
-    Spawnpoint.framesSinceRespawn = 999
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    if hum then
-        Spawnpoint.lastHealth = hum.Health
-        Spawnpoint.lastMaxHealth = hum.MaxHealth
-        Spawnpoint.wasAlive = hum.Health > 0
-    end
+    Spawnpoint.wasDead = false
+    Spawnpoint.wasAliveLastFrame = true
+    Spawnpoint.cooldown = 0
+    Spawnpoint.lastPos = nil
+    
+    KeybindsGui.needsRedraw = true
     notify("Spawnpoint set!")
 end
 
@@ -967,126 +1601,104 @@ local function clearSpawnpoint()
     Spawnpoint.enabled = false
     Spawnpoint.position = nil
     Spawnpoint.cframe = nil
-    Spawnpoint.lastCharacter = nil
-    Spawnpoint.lastCharacterName = nil
-    Spawnpoint.lastRootPart = nil
-    Spawnpoint.lastHealth = 100
-    Spawnpoint.lastMaxHealth = 100
-    Spawnpoint.wasAlive = true
-    Spawnpoint.lastPosition = nil
-    Spawnpoint.teleportCooldown = 0
-    Spawnpoint.justTeleported = false
+    Spawnpoint.wasDead = false
+    KeybindsGui.needsRedraw = true
     notify("Spawnpoint cleared")
 end
 
-local function doSpawnpointTeleport()
-    if not Spawnpoint.position then return false end
-    local char = LocalPlayer.Character
-    if not char then return false end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return false end
-    local offset = Vector3.new((math.random() - 0.5) * 2, 0, (math.random() - 0.5) * 2)
-    pcall(function()
-        root.CFrame = CFrame.new(Spawnpoint.position + offset)
-        root.Velocity = Vector3.new(0, 0, 0)
-    end)
-    Spawnpoint.justTeleported = true
-    Spawnpoint.teleportCooldown = 1.5
-    Spawnpoint.lastPosition = Spawnpoint.position + offset
-    return true
-end
-
-local function checkSpawnpoint()
+local function updateSpawnpoint(dt)
     if not Spawnpoint.enabled or not Spawnpoint.position then return end
-    if Spawnpoint.teleportCooldown > 0 then
-        Spawnpoint.teleportCooldown = Spawnpoint.teleportCooldown - 0.016
-        return
-    end
-    local char = LocalPlayer.Character
-    if not char then Spawnpoint.wasAlive = false Spawnpoint.lastCharacter = nil return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then Spawnpoint.wasAlive = false return end
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local currentHealth = hum and hum.Health or 100
-    local currentMaxHealth = hum and hum.MaxHealth or 100
-    local isAlive = currentHealth > 0
-    local currentPosition = root.Position
-    local shouldTeleport = false
+    if Spawnpoint.cooldown > 0 then Spawnpoint.cooldown = Spawnpoint.cooldown - dt return end
     
-    if char ~= Spawnpoint.lastCharacter and Spawnpoint.lastCharacter ~= nil then shouldTeleport = true end
-    if char.Name ~= Spawnpoint.lastCharacterName and Spawnpoint.lastCharacterName ~= nil then shouldTeleport = true end
-    if root ~= Spawnpoint.lastRootPart and Spawnpoint.lastRootPart ~= nil then shouldTeleport = true end
-    if not Spawnpoint.wasAlive and isAlive then shouldTeleport = true end
-    if Spawnpoint.lastHealth <= 0 and currentHealth >= currentMaxHealth * 0.9 then shouldTeleport = true end
-    if Spawnpoint.lastPosition and not Spawnpoint.justTeleported then
-        local dist = distance(currentPosition, Spawnpoint.lastPosition)
-        if dist > 100 and currentHealth >= currentMaxHealth * 0.8 then shouldTeleport = true end
-    end
-    if Spawnpoint.lastMaxHealth > 0 and currentMaxHealth ~= Spawnpoint.lastMaxHealth then
-        if currentHealth >= currentMaxHealth * 0.9 then shouldTeleport = true end
-    end
-    
-    if shouldTeleport then Spawnpoint.framesSinceRespawn = 0 end
-    if Spawnpoint.framesSinceRespawn < 60 then
-        Spawnpoint.framesSinceRespawn = Spawnpoint.framesSinceRespawn + 1
-        if Spawnpoint.framesSinceRespawn == 15 or Spawnpoint.framesSinceRespawn == 30 or Spawnpoint.framesSinceRespawn == 45 then
-            if doSpawnpointTeleport() then notify("Respawn → Spawnpoint") end
-        end
-    end
-    
-    Spawnpoint.lastCharacter = char
-    Spawnpoint.lastCharacterName = char.Name
-    Spawnpoint.lastRootPart = root
-    Spawnpoint.lastHealth = currentHealth
-    Spawnpoint.lastMaxHealth = currentMaxHealth
-    Spawnpoint.wasAlive = isAlive
-    if not Spawnpoint.justTeleported then Spawnpoint.lastPosition = currentPosition end
-    Spawnpoint.justTeleported = false
-end
-
-local function savePos(slot)
-    local slotNum = math.clamp(tonumber(slot) or 1, 1, 9)
-    local char = LocalPlayer.Character
-    if not char then notify("No character") return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then notify("No HumanoidRootPart") return end
-    Teleport.savedPositions[slotNum] = {cframe = root.CFrame, position = root.Position}
-    notify("Position saved to slot " .. slotNum)
-end
-
-local function loadPos(slot)
-    local slotNum = math.clamp(tonumber(slot) or 1, 1, 9)
-    local saved = Teleport.savedPositions[slotNum]
-    if not saved then notify("No position saved in slot " .. slotNum) return end
-    local char = LocalPlayer.Character
-    if not char then notify("No character") return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then notify("No HumanoidRootPart") return end
     pcall(function()
-        root.CFrame = saved.cframe
-        root.Velocity = Vector3.new(0, 0, 0)
+        local char = LocalPlayer.Character
+        if not char then 
+            Spawnpoint.wasDead = true 
+            Spawnpoint.wasAliveLastFrame = false
+            return 
+        end
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root or not root:IsA("BasePart") then 
+            Spawnpoint.wasDead = true 
+            Spawnpoint.wasAliveLastFrame = false
+            return 
+        end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        
+        local currentHealth = hum.Health
+        local isAliveNow = currentHealth > 0
+        
+        if isAliveNow then 
+            Spawnpoint.lastPos = root.Position 
+        end
+        
+        if Spawnpoint.wasAliveLastFrame and not isAliveNow then
+            Spawnpoint.wasDead = true
+        end
+        
+        if Spawnpoint.wasDead and isAliveNow then
+            bypassTeleport(Spawnpoint.position, true)
+            notify("Respawn → Spawnpoint")
+            Spawnpoint.wasDead = false
+            Spawnpoint.cooldown = 2
+        end
+        
+        Spawnpoint.wasAliveLastFrame = isAliveNow
     end)
-    notify("Loaded position from slot " .. slotNum)
 end
 
 local function initWorldPtr()
-    if Gravity.worldPtr then return true end
-    pcall(function() Gravity.worldPtr = memory.readu64(workspace, Gravity.workspaceToWorldOffset) end)
-    return Gravity.worldPtr ~= nil
+    if Gravity.worldPtr and Gravity.worldPtr ~= 0 then return true end
+    
+    local success, result = pcall(function() 
+        return memory.readu64(workspace, Gravity.workspaceToWorldOffset)
+    end)
+    
+    if success and result and result ~= 0 then
+        Gravity.worldPtr = result
+        return true
+    end
+    
+    Gravity.worldPtr = nil
+    return false
 end
 
 local function setGravity(value)
     local num = tonumber(value)
     if not num then notify("Invalid gravity value") return end
-    if not initWorldPtr() then notify("Failed to get world pointer") return end
-    pcall(function() memory.writef32(Gravity.worldPtr, Gravity.offset, num) end)
-    notify("Gravity set to " .. num)
+    
+    local attempts = 0
+    local maxAttempts = 3
+    
+    while attempts < maxAttempts do
+        if initWorldPtr() then
+            local success = pcall(function() 
+                memory.writef32(Gravity.worldPtr, Gravity.offset, num) 
+            end)
+            if success then
+                notify("Gravity set to " .. num)
+                return
+            end
+        end
+        attempts = attempts + 1
+        if attempts < maxAttempts then
+            Gravity.worldPtr = nil
+            task.wait(0.1)
+        end
+    end
+    
+    notify("Failed to set gravity")
 end
 
 local function resetGravity()
     if not initWorldPtr() then notify("Failed to get world pointer") return end
-    pcall(function() memory.writef32(Gravity.worldPtr, Gravity.offset, Gravity.default) end)
-    notify("Gravity reset to " .. Gravity.default)
+    local success = pcall(function() memory.writef32(Gravity.worldPtr, Gravity.offset, Gravity.default) end)
+    if success then
+        notify("Gravity reset to " .. Gravity.default)
+    else
+        notify("Failed to reset gravity")
+    end
 end
 
 local function forceReset()
@@ -1095,7 +1707,7 @@ local function forceReset()
     local success = false
     pcall(function()
         local hum = char:FindFirstChildOfClass("Humanoid")
-        if hum then memory.writef32(hum, 0x194, 0) success = true end
+        if hum then memory.writef32(hum, Offsets.Health, 0) success = true end
     end)
     if not success then
         pcall(function()
@@ -1120,6 +1732,80 @@ local function getUserId(name)
     notify(player.Name .. "'s UserId: " .. userId .. " (copied)")
 end
 
+local function clickTpOn()
+    if Features.clickTpEnabled then return end
+    Features.clickTpEnabled = true
+    KeybindsGui.needsRedraw = true
+    local key, mode = getKeybindForCommand("clicktp")
+    if key then
+        notify("ClickTP enabled - " .. formatKeyName(key) .. " + Click")
+    else
+        notify("ClickTP enabled - Bind a key in Options!")
+    end
+end
+
+local function clickTpOff()
+    Features.clickTpEnabled = false
+    KeybindsGui.needsRedraw = true
+    notify("ClickTP disabled")
+end
+
+local function performClickTP()
+    if not Features.clickTpEnabled then return false end
+    
+    local targetPos = PerformClickTPRaycast()
+    if targetPos then
+        bypassTeleport(targetPos, true)
+        return true
+    end
+    return false
+end
+
+local function scanProximityPrompts()
+    ProximityPromptCache.prompts = {}
+    pcall(function()
+        for _, obj in game:GetDescendants() do
+            if obj.ClassName == "ProximityPrompt" then
+                table.insert(ProximityPromptCache.prompts, obj)
+            end
+        end
+    end)
+    ProximityPromptCache.lastScan = os_clock()
+end
+
+local function instantInteractOn()
+    if Features.instantInteractEnabled then return end
+    Features.instantInteractEnabled = true
+    scanProximityPrompts()
+    KeybindsGui.needsRedraw = true
+    notify("Instant Interact enabled")
+end
+
+local function instantInteractOff()
+    Features.instantInteractEnabled = false
+    KeybindsGui.needsRedraw = true
+    notify("Instant Interact disabled")
+end
+
+local function updateInstantInteract()
+    if not Features.instantInteractEnabled then return end
+    
+    if os_clock() - ProximityPromptCache.lastScan > ProximityPromptCache.scanInterval then
+        scanProximityPrompts()
+    end
+    
+    pcall(function()
+        for i = #ProximityPromptCache.prompts, 1, -1 do
+            local prompt = ProximityPromptCache.prompts[i]
+            if prompt and prompt.Parent then
+                memory.writef32(prompt, Offsets.ProximityPromptHoldDuration, 0)
+            else
+                table.remove(ProximityPromptCache.prompts, i)
+            end
+        end
+    end)
+end
+
 local toggleCommandPanel
 local toggleOptions
 local showKeybindsGui
@@ -1134,7 +1820,8 @@ local commands = {
     {name = "uninfjump", desc = "Disable infinite jump", usage = ";uninfjump", cat = "Movement", fn = function() infJumpOff() end},
     {name = "view", desc = "Watch a player", usage = ";view [name]", cat = "Visual", args = "player", fn = function(a) if a[1] then specOn(a[1]) end end},
     {name = "unview", desc = "Stop viewing", usage = ";unview", cat = "Visual", fn = function() specOff() end},
-    {name = "fov", desc = "Set camera FOV", usage = ";fov [num]", cat = "Visual", fn = function(a) if a[1] then setFov(a[1]) else resetFov() end end},
+    {name = "fov", desc = "Set camera FOV", usage = ";fov [num]", cat = "Visual", fn = function(a) if a[1] then setFov(a[1]) else notify("Usage: ;fov [number]") end end},
+    {name = "unfov", desc = "Reset FOV to default", usage = ";unfov", cat = "Visual", fn = function() resetFov() end},
     {name = "thirdperson", desc = "Force third person view", usage = ";thirdperson", cat = "Visual", fn = function() thirdPersonOn() end},
     {name = "unthirdperson", desc = "Disable third person", usage = ";unthirdperson", cat = "Visual", fn = function() thirdPersonOff() end},
     {name = "tp", desc = "Teleport to player", usage = ";tp [name]", cat = "Teleport", args = "player", fn = function(a) if a[1] then tpToPlayer(a[1]) end end},
@@ -1142,20 +1829,23 @@ local commands = {
     {name = "spawn", desc = "Go to game spawn", usage = ";spawn", cat = "Teleport", fn = function() goToSpawn() end},
     {name = "spawnpoint", desc = "Set respawn position", usage = ";spawnpoint", cat = "Teleport", fn = function() setSpawnpoint() end},
     {name = "unspawnpoint", desc = "Clear respawn position", usage = ";unspawnpoint", cat = "Teleport", fn = function() clearSpawnpoint() end},
-    {name = "savepos", desc = "Save current position", usage = ";savepos [1-9]", cat = "Teleport", fn = function(a) savePos(a[1]) end},
-    {name = "loadpos", desc = "Load saved position", usage = ";loadpos [1-9]", cat = "Teleport", fn = function(a) loadPos(a[1]) end},
     {name = "diedtp", desc = "Auto return to death location", usage = ";diedtp", cat = "Teleport", fn = function() diedTpOn() end},
     {name = "undiedtp", desc = "Disable death return", usage = ";undiedtp", cat = "Teleport", fn = function() diedTpOff() end},
+    {name = "clicktp", desc = "Click to teleport", usage = ";clicktp", cat = "Teleport", fn = function() clickTpOn() end},
+    {name = "unclicktp", desc = "Disable click teleport", usage = ";unclicktp", cat = "Teleport", fn = function() clickTpOff() end},
     {name = "antivoid", desc = "Teleport to spawn when falling", usage = ";antivoid", cat = "Utility", fn = function() antiVoidOn() end},
     {name = "unantivoid", desc = "Disable anti-void", usage = ";unantivoid", cat = "Utility", fn = function() antiVoidOff() end},
     {name = "forcereset", desc = "Force kill (bypass reset locks)", usage = ";forcereset", cat = "Utility", fn = function() forceReset() end},
     {name = "userid", desc = "Copy player's UserId", usage = ";userid [name]", cat = "Utility", args = "player", fn = function(a) getUserId(a[1]) end},
+    {name = "instantinteract", desc = "Instant ProximityPrompt", usage = ";instantinteract", cat = "Utility", fn = function() instantInteractOn() end},
+    {name = "uninstantinteract", desc = "Disable instant interact", usage = ";uninstantinteract", cat = "Utility", fn = function() instantInteractOff() end},
     {name = "serverinfo", desc = "Show server information", usage = ";serverinfo", cat = "Utility", fn = function() toggleServerInfo() end},
     {name = "cmds", desc = "Open command panel", usage = ";cmds", cat = "Utility", fn = function() toggleCommandPanel() end},
     {name = "options", desc = "Open settings panel", usage = ";options", cat = "Utility", fn = function() toggleOptions() end},
     {name = "keybinds", desc = "Show active features panel", usage = ";keybinds", cat = "Utility", fn = function() showKeybindsGui() end},
     {name = "unkeybinds", desc = "Hide active features panel", usage = ";unkeybinds", cat = "Utility", fn = function() hideKeybindsGui() end},
-    {name = "gravity", desc = "Set world gravity", usage = ";gravity [num]", cat = "Fun", fn = function(a) if a[1] then setGravity(a[1]) else resetGravity() end end},
+    {name = "gravity", desc = "Set world gravity", usage = ";gravity [num]", cat = "Fun", fn = function(a) if a[1] then setGravity(a[1]) else notify("Usage: ;gravity [number]") end end},
+    {name = "ungravity", desc = "Reset gravity to default", usage = ";ungravity", cat = "Fun", fn = function() resetGravity() end},
 }
 
 toggleFeatures = {
@@ -1166,6 +1856,9 @@ toggleFeatures = {
     spawnpoint = function() return Spawnpoint.enabled end,
     keybinds = function() return KeybindsGui.open end,
     thirdperson = function() return Features.thirdPersonEnabled end,
+    instantinteract = function() return Features.instantInteractEnabled end,
+    clicktp = function() return Features.clickTpEnabled end,
+    fov = function() return Features.fovEnabled end,
 }
 
 runCmd = function(input)
@@ -1182,21 +1875,66 @@ runCmd = function(input)
     return false
 end
 
-local function executeKeybind(key)
-    local cmdName = Keybinds.binds[key]
-    if not cmdName then return end
+local function executeKeybind(key, isPressed)
+    local data = Keybinds.binds[key]
+    if not data then return end
     
-    local checkFn = toggleFeatures[cmdName]
-    if checkFn then
-        if checkFn() then
-            runCmd(";un" .. cmdName)
-        else
-            runCmd(";" .. cmdName)
+    local cmdName = type(data) == "table" and data.cmd or data
+    local mode = Keybinds.modes[cmdName] or "toggle"
+    
+    -- ClickTP is handled separately - keybind just enables/disables the feature
+    if cmdName == "clicktp" then
+        if mode == "toggle" then
+            if isPressed then
+                if Features.clickTpEnabled then
+                    runCmd(";unclicktp")
+                else
+                    runCmd(";clicktp")
+                end
+            end
+        else -- hold mode
+            if isPressed then
+                if not Features.clickTpEnabled then
+                    runCmd(";clicktp")
+                    Keybinds.activeHolds[cmdName] = true
+                end
+            else
+                if Keybinds.activeHolds[cmdName] then
+                    runCmd(";unclicktp")
+                    Keybinds.activeHolds[cmdName] = nil
+                end
+            end
         end
         return
     end
     
-    runCmd(";" .. cmdName)
+    local checkFn = toggleFeatures[cmdName]
+    
+    if mode == "hold" then
+        if isPressed then
+            if checkFn and not checkFn() then
+                runCmd(";" .. cmdName)
+                Keybinds.activeHolds[cmdName] = true
+            end
+        else
+            if Keybinds.activeHolds[cmdName] then
+                runCmd(";un" .. cmdName)
+                Keybinds.activeHolds[cmdName] = nil
+            end
+        end
+    else
+        if isPressed then
+            if checkFn then
+                if checkFn() then
+                    runCmd(";un" .. cmdName)
+                else
+                    runCmd(";" .. cmdName)
+                end
+            else
+                runCmd(";" .. cmdName)
+            end
+        end
+    end
 end
 
 local function getOptionsFiltered()
@@ -1250,33 +1988,41 @@ local function clearStatusBar()
 end
 
 local function clearCommandPanelDrawing()
-    for _, el in CommandPanelDrawing.elements do
-        pcall(function() el:Remove() end)
-    end
+    for _, el in CommandPanelDrawing.elements do pcall(function() el:Remove() end) end
     CommandPanelDrawing.elements = {}
     CommandPanelDrawing.itemBounds = {}
     CommandPanelDrawing.categoryBounds = {}
 end
 
 -- ============================================
--- COMMAND PANEL (Drawing API)
+-- COMMAND PANEL
 -- ============================================
 local function getFilteredPanelCommands()
     local filtered = {}
     local query = string.lower(CommandPanel.searchQuery)
-    
     for _, cmd in commandsForPanel do
         local matchesCategory = (CommandPanel.selectedCategory == "ALL" or cmd.cat == CommandPanel.selectedCategory)
-        local matchesSearch = (query == "" or 
-            string.find(string.lower(cmd.name), query, 1, true) or 
-            string.find(string.lower(cmd.desc), query, 1, true))
+        local matchesSearch = true
+        
+        if query ~= "" then
+            local nameMatch = string.find(string.lower(cmd.name), query, 1, true)
+            local descMatch = string.find(string.lower(cmd.desc), query, 1, true)
+            local catMatch = string.find(string.lower(cmd.cat), query, 1, true)
+            matchesSearch = nameMatch or descMatch or catMatch
+        end
         
         if matchesCategory and matchesSearch then
             table.insert(filtered, cmd)
         end
     end
-    
     return filtered
+end
+
+local function getDisplayUsername()
+    if Settings.hideUsername then
+        return "Anonymous"
+    end
+    return LocalPlayer.Name
 end
 
 local function createCommandPanelDrawing()
@@ -1305,6 +2051,7 @@ local function createCommandPanelDrawing()
     local ITEM_H = 54
     local PAD = 12
     
+    -- Shadow
     local shadow = Drawing.new("Square")
     shadow.Visible = true
     shadow.Filled = true
@@ -1315,6 +2062,7 @@ local function createCommandPanelDrawing()
     shadow.Size = Vector2.new(W + 16, H + 16)
     table.insert(els, shadow)
     
+    -- Main background
     local main = Drawing.new("Square")
     main.Visible = true
     main.Filled = true
@@ -1324,6 +2072,7 @@ local function createCommandPanelDrawing()
     main.Size = Vector2.new(W, H)
     table.insert(els, main)
     
+    -- Border
     local border = Drawing.new("Square")
     border.Visible = true
     border.Filled = false
@@ -1334,6 +2083,7 @@ local function createCommandPanelDrawing()
     border.Size = Vector2.new(W, H)
     table.insert(els, border)
     
+    -- Header
     local header = Drawing.new("Square")
     header.Visible = true
     header.Filled = true
@@ -1353,6 +2103,7 @@ local function createCommandPanelDrawing()
     
     CommandPanelDrawing.headerBounds = {pos = Vector2.new(px, py), size = Vector2.new(W - 40, HEADER_H)}
     
+    -- Avatar
     local avatarRing = Drawing.new("Circle")
     avatarRing.Visible = true
     avatarRing.Filled = false
@@ -1363,9 +2114,10 @@ local function createCommandPanelDrawing()
     avatarRing.Radius = 18
     table.insert(els, avatarRing)
     
+    local displayName = getDisplayUsername()
     local avatarLetter = Drawing.new("Text")
     avatarLetter.Visible = true
-    avatarLetter.Text = string.upper(string.sub(LocalPlayer.Name, 1, 1))
+    avatarLetter.Text = string.upper(string.sub(displayName, 1, 1))
     avatarLetter.Size = 16
     avatarLetter.Color = Theme.Accent
     avatarLetter.Outline = true
@@ -1375,13 +2127,14 @@ local function createCommandPanelDrawing()
     
     local username = Drawing.new("Text")
     username.Visible = true
-    username.Text = LocalPlayer.Name
+    username.Text = displayName
     username.Size = 14
     username.Color = Theme.TextPrimary
     username.Outline = true
     username.Position = Vector2.new(px + 62, py + HEADER_H / 2 - 8)
     table.insert(els, username)
     
+    -- Search bar
     local searchX = px + 200
     local searchY = py + 12
     local searchW = W - 260
@@ -1401,7 +2154,7 @@ local function createCommandPanelDrawing()
     searchBorder.Filled = false
     searchBorder.Color = CommandPanel.searchFocused and Theme.Accent or Theme.Border
     searchBorder.Rounding = 6
-    searchBorder.Thickness = 1
+    searchBorder.Thickness = CommandPanel.searchFocused and 2 or 1
     searchBorder.Position = Vector2.new(searchX, searchY)
     searchBorder.Size = Vector2.new(searchW, searchH)
     table.insert(els, searchBorder)
@@ -1412,7 +2165,7 @@ local function createCommandPanelDrawing()
     searchIcon.Visible = true
     searchIcon.Text = ">"
     searchIcon.Size = 14
-    searchIcon.Color = Theme.TextMuted
+    searchIcon.Color = CommandPanel.searchFocused and Theme.Accent or Theme.TextMuted
     searchIcon.Outline = true
     searchIcon.Position = Vector2.new(searchX + 10, searchY + 10)
     table.insert(els, searchIcon)
@@ -1426,11 +2179,12 @@ local function createCommandPanelDrawing()
     end
     searchText.Text = displayText
     searchText.Size = 12
-    searchText.Color = CommandPanel.searchQuery == "" and Theme.TextMuted or Theme.TextPrimary
+    searchText.Color = CommandPanel.searchQuery == "" and not CommandPanel.searchFocused and Theme.TextMuted or Theme.TextPrimary
     searchText.Outline = true
     searchText.Position = Vector2.new(searchX + 26, searchY + 11)
     table.insert(els, searchText)
     
+    -- Close button
     local closeX = px + W - 44
     local closeY = py + 14
     local closeBg = Drawing.new("Square")
@@ -1454,6 +2208,7 @@ local function createCommandPanelDrawing()
     closeText.Position = Vector2.new(closeX + 16, closeY + 5)
     table.insert(els, closeText)
     
+    -- Sidebar
     local sidebarX = px
     local sidebarY = py + HEADER_H
     local sidebarH = H - HEADER_H - FOOTER_H
@@ -1481,11 +2236,7 @@ local function createCommandPanelDrawing()
         catBg.Size = Vector2.new(SIDEBAR_W - 16, 34)
         table.insert(els, catBg)
         
-        table.insert(CommandPanelDrawing.categoryBounds, {
-            pos = Vector2.new(sidebarX + 8, catY),
-            size = Vector2.new(SIDEBAR_W - 16, 34),
-            name = category.name
-        })
+        table.insert(CommandPanelDrawing.categoryBounds, {pos = Vector2.new(sidebarX + 8, catY), size = Vector2.new(SIDEBAR_W - 16, 34), name = category.name})
         
         if isSelected then
             local indicator = Drawing.new("Square")
@@ -1519,15 +2270,13 @@ local function createCommandPanelDrawing()
         catY = catY + 40
     end
     
+    -- Content area
     local contentX = px + SIDEBAR_W + PAD
     local contentY = py + HEADER_H + PAD
     local contentW = W - SIDEBAR_W - PAD * 2 - 14
     local contentH = H - HEADER_H - FOOTER_H - PAD * 2
     
-    CommandPanelDrawing.contentBounds = {
-        pos = Vector2.new(contentX, contentY),
-        size = Vector2.new(contentW + 14, contentH)
-    }
+    CommandPanelDrawing.contentBounds = {pos = Vector2.new(contentX, contentY), size = Vector2.new(contentW + 14, contentH)}
     
     local filtered = getFilteredPanelCommands()
     local maxScroll = math.max(0, #filtered - CommandPanelDrawing.maxVisible)
@@ -1538,65 +2287,74 @@ local function createCommandPanelDrawing()
     
     CommandPanelDrawing.itemBounds = {}
     
-    for i = startIdx, endIdx do
-        local cmd = filtered[i]
-        local localIdx = i - startIdx
-        local itemY = contentY + localIdx * (ITEM_H + 6)
-        
-        local itemBg = Drawing.new("Square")
-        itemBg.Visible = true
-        itemBg.Filled = true
-        itemBg.Color = Theme.Card
-        itemBg.Rounding = 6
-        itemBg.Position = Vector2.new(contentX, itemY)
-        itemBg.Size = Vector2.new(contentW, ITEM_H)
-        table.insert(els, itemBg)
-        
-        table.insert(CommandPanelDrawing.itemBounds, {
-            pos = Vector2.new(contentX, itemY),
-            size = Vector2.new(contentW, ITEM_H),
-            cmd = cmd
-        })
-        
-        local tagW = 70
-        local tagBg = Drawing.new("Square")
-        tagBg.Visible = true
-        tagBg.Filled = true
-        tagBg.Color = catColor(cmd.cat)
-        tagBg.Rounding = 4
-        tagBg.Position = Vector2.new(contentX + 10, itemY + 8)
-        tagBg.Size = Vector2.new(tagW, 18)
-        table.insert(els, tagBg)
-        
-        local tagText = Drawing.new("Text")
-        tagText.Visible = true
-        tagText.Text = cmd.cat
-        tagText.Size = 9
-        tagText.Color = Theme.TextPrimary
-        tagText.Outline = true
-        tagText.Center = true
-        tagText.Position = Vector2.new(contentX + 10 + tagW / 2, itemY + 11)
-        table.insert(els, tagText)
-        
-        local cmdName = Drawing.new("Text")
-        cmdName.Visible = true
-        cmdName.Text = ";" .. cmd.name
-        cmdName.Size = 13
-        cmdName.Color = Theme.Accent
-        cmdName.Outline = true
-        cmdName.Position = Vector2.new(contentX + tagW + 20, itemY + 10)
-        table.insert(els, cmdName)
-        
-        local desc = Drawing.new("Text")
-        desc.Visible = true
-        desc.Text = cmd.desc
-        desc.Size = 11
-        desc.Color = Theme.TextSecondary
-        desc.Outline = true
-        desc.Position = Vector2.new(contentX + 10, itemY + 32)
-        table.insert(els, desc)
+    if #filtered == 0 then
+        local noResults = Drawing.new("Text")
+        noResults.Visible = true
+        noResults.Text = "No commands found"
+        noResults.Size = 14
+        noResults.Color = Theme.TextMuted
+        noResults.Outline = true
+        noResults.Center = true
+        noResults.Position = Vector2.new(contentX + contentW / 2, contentY + 50)
+        table.insert(els, noResults)
+    else
+        for i = startIdx, endIdx do
+            local cmd = filtered[i]
+            local localIdx = i - startIdx
+            local itemY = contentY + localIdx * (ITEM_H + 6)
+            
+            local itemBg = Drawing.new("Square")
+            itemBg.Visible = true
+            itemBg.Filled = true
+            itemBg.Color = Theme.Card
+            itemBg.Rounding = 6
+            itemBg.Position = Vector2.new(contentX, itemY)
+            itemBg.Size = Vector2.new(contentW, ITEM_H)
+            table.insert(els, itemBg)
+            
+            table.insert(CommandPanelDrawing.itemBounds, {pos = Vector2.new(contentX, itemY), size = Vector2.new(contentW, ITEM_H), cmd = cmd})
+            
+            local tagW = 70
+            local tagBg = Drawing.new("Square")
+            tagBg.Visible = true
+            tagBg.Filled = true
+            tagBg.Color = catColor(cmd.cat)
+            tagBg.Rounding = 4
+            tagBg.Position = Vector2.new(contentX + 10, itemY + 8)
+            tagBg.Size = Vector2.new(tagW, 18)
+            table.insert(els, tagBg)
+            
+            local tagText = Drawing.new("Text")
+            tagText.Visible = true
+            tagText.Text = cmd.cat
+            tagText.Size = 9
+            tagText.Color = Theme.TextPrimary
+            tagText.Outline = true
+            tagText.Center = true
+            tagText.Position = Vector2.new(contentX + 10 + tagW / 2, itemY + 11)
+            table.insert(els, tagText)
+            
+            local cmdName = Drawing.new("Text")
+            cmdName.Visible = true
+            cmdName.Text = ";" .. cmd.name
+            cmdName.Size = 13
+            cmdName.Color = Theme.Accent
+            cmdName.Outline = true
+            cmdName.Position = Vector2.new(contentX + tagW + 20, itemY + 10)
+            table.insert(els, cmdName)
+            
+            local desc = Drawing.new("Text")
+            desc.Visible = true
+            desc.Text = cmd.desc
+            desc.Size = 11
+            desc.Color = Theme.TextSecondary
+            desc.Outline = true
+            desc.Position = Vector2.new(contentX + 10, itemY + 32)
+            table.insert(els, desc)
+        end
     end
     
+    -- Scrollbar
     if maxScroll > 0 then
         local scrollbarX = px + W - 18
         local scrollbarY = contentY
@@ -1622,17 +2380,12 @@ local function createCommandPanelDrawing()
         scrollThumb.Size = Vector2.new(8, thumbH)
         table.insert(els, scrollThumb)
         
-        CommandPanelDrawing.scrollBounds = {
-            pos = Vector2.new(scrollbarX, scrollbarY),
-            size = Vector2.new(8, scrollbarH),
-            thumbH = thumbH,
-            thumbY = thumbY,
-            maxScroll = maxScroll
-        }
+        CommandPanelDrawing.scrollBounds = {pos = Vector2.new(scrollbarX, scrollbarY), size = Vector2.new(8, scrollbarH), thumbH = thumbH, thumbY = thumbY, maxScroll = maxScroll}
     else
-        CommandPanelDrawing.scrollBounds = {}
+        CommandPanelDrawing.scrollBounds = nil
     end
     
+    -- Footer
     local footerY = py + H - FOOTER_H
     
     local footerLine = Drawing.new("Square")
@@ -1654,12 +2407,14 @@ local function createCommandPanelDrawing()
     
     local hint = Drawing.new("Text")
     hint.Visible = true
-    hint.Text = "ESC to close • Drag header to move"
+    hint.Text = "Click X to close • Drag header to move"
     hint.Size = 10
     hint.Color = Theme.TextMuted
     hint.Outline = true
-    hint.Position = Vector2.new(px + W - 210, footerY + 12)
+    hint.Position = Vector2.new(px + W - 230, footerY + 12)
     table.insert(els, hint)
+    
+    CommandPanelDrawing.needsRedraw = false
 end
 
 local function showCommandPanel()
@@ -1670,6 +2425,7 @@ local function showCommandPanel()
     CommandPanel.searchFocused = false
     CommandPanelDrawing.scrollOffset = 0
     CommandPanelDrawing.scrollDragging = false
+    CommandPanelDrawing.needsRedraw = true
     createCommandPanelDrawing()
 end
 
@@ -1682,11 +2438,7 @@ local function hideCommandPanel()
 end
 
 toggleCommandPanel = function()
-    if CommandPanel.open then
-        hideCommandPanel()
-    else
-        showCommandPanel()
-    end
+    if CommandPanel.open then hideCommandPanel() else showCommandPanel() end
 end
 
 toggleOptions = function()
@@ -1712,6 +2464,7 @@ end
 showKeybindsGui = function()
     if KeybindsGui.open then return end
     KeybindsGui.open = true
+    KeybindsGui.needsRedraw = true
     notify("Keybinds panel opened")
 end
 
@@ -1792,15 +2545,15 @@ local function createBar()
     bar.Size = Vector2.new(bW, bH)
     table.insert(els, bar)
     
-    local border = Drawing.new("Square")
-    border.Visible = true
-    border.Filled = false
-    border.Color = Theme.Accent
-    border.Rounding = 8
-    border.Thickness = 2
-    border.Position = Vector2.new(bX, bY)
-    border.Size = Vector2.new(bW, bH)
-    table.insert(els, border)
+    local borderBar = Drawing.new("Square")
+    borderBar.Visible = true
+    borderBar.Filled = false
+    borderBar.Color = Theme.Accent
+    borderBar.Rounding = 8
+    borderBar.Thickness = 2
+    borderBar.Position = Vector2.new(bX, bY)
+    borderBar.Size = Vector2.new(bW, bH)
+    table.insert(els, borderBar)
     
     local prompt = Drawing.new("Text")
     prompt.Visible = true
@@ -1869,14 +2622,14 @@ local function createBar()
                 dot.Radius = 4
                 table.insert(els, dot)
                 
-                local displayText = suggestion.displayName
+                local displayTextSug = suggestion.displayName
                 if suggestion.displayName ~= suggestion.name then
-                    displayText = suggestion.displayName .. " (@" .. suggestion.name .. ")"
+                    displayTextSug = suggestion.displayName .. " (@" .. suggestion.name .. ")"
                 end
                 
                 local nameT = Drawing.new("Text")
                 nameT.Visible = true
-                nameT.Text = displayText
+                nameT.Text = displayTextSug
                 nameT.Size = 13
                 nameT.Color = sel and Theme.AccentLight or Theme.TextPrimary
                 nameT.Outline = true
@@ -1932,7 +2685,9 @@ local function createBar()
     
     Bar.needsRedraw = false
 end
-
+-- ============================================
+-- OPTIONS PANEL
+-- ============================================
 local function createOptions()
     clearOptions()
     
@@ -1956,6 +2711,7 @@ local function createOptions()
     Options.generalItems = {}
     Options.tabBounds = {}
     
+    -- Shadow
     local shadow = Drawing.new("Square")
     shadow.Visible = true
     shadow.Filled = true
@@ -1966,6 +2722,7 @@ local function createOptions()
     shadow.Size = Vector2.new(Options.W + 12, Options.H + 12)
     table.insert(els, shadow)
     
+    -- Main
     local main = Drawing.new("Square")
     main.Visible = true
     main.Filled = true
@@ -1975,6 +2732,7 @@ local function createOptions()
     main.Size = Vector2.new(Options.W, Options.H)
     table.insert(els, main)
     
+    -- Header
     local head = Drawing.new("Square")
     head.Visible = true
     head.Filled = true
@@ -1993,6 +2751,7 @@ local function createOptions()
     hFix.Size = Vector2.new(Options.W, 14)
     table.insert(els, hFix)
     
+    -- Close button
     local closeX = px + Options.W - 36
     local closeY = py + 14
     local closeBg = Drawing.new("Square")
@@ -2015,6 +2774,7 @@ local function createOptions()
     closeT.Position = Vector2.new(closeX + 12, closeY + 3)
     table.insert(els, closeT)
     
+    -- Logo
     local logoRing = Drawing.new("Circle")
     logoRing.Visible = true
     logoRing.Filled = false
@@ -2044,6 +2804,7 @@ local function createOptions()
     title.Position = Vector2.new(px + 55, py + Options.HEADER / 2 - 10)
     table.insert(els, title)
     
+    -- Tabs
     local tabY = py + Options.HEADER + 10
     local tabs = {{id = "keybinds", label = "Keybinds"}, {id = "theme", label = "Theme"}, {id = "general", label = "General"}}
     local tabWidth = (Options.W - Options.PAD * 2 - 16) / 3
@@ -2077,92 +2838,183 @@ local function createOptions()
     local contentStartY = tabY + Options.TAB_H + 15
     
     if Options.tab == "keybinds" then
+        -- Search bar
+        local searchX = px + Options.PAD
+        local searchY = contentStartY
+        local searchW = Options.W - Options.PAD * 2
+        local searchH = 36
+        
+        local searchBg = Drawing.new("Square")
+        searchBg.Visible = true
+        searchBg.Filled = true
+        searchBg.Color = Theme.Tertiary
+        searchBg.Rounding = 6
+        searchBg.Position = Vector2.new(searchX, searchY)
+        searchBg.Size = Vector2.new(searchW, searchH)
+        table.insert(els, searchBg)
+        
+        local searchBorder = Drawing.new("Square")
+        searchBorder.Visible = true
+        searchBorder.Filled = false
+        searchBorder.Color = Options.searchFocused and Theme.Accent or Theme.Border
+        searchBorder.Rounding = 6
+        searchBorder.Thickness = Options.searchFocused and 2 or 1
+        searchBorder.Position = Vector2.new(searchX, searchY)
+        searchBorder.Size = Vector2.new(searchW, searchH)
+        table.insert(els, searchBorder)
+        
+        Options.searchBounds = {pos = Vector2.new(searchX, searchY), size = Vector2.new(searchW, searchH)}
+        
+        local searchIcon = Drawing.new("Text")
+        searchIcon.Visible = true
+        searchIcon.Text = ">"
+        searchIcon.Size = 14
+        searchIcon.Color = Options.searchFocused and Theme.Accent or Theme.TextMuted
+        searchIcon.Outline = true
+        searchIcon.Position = Vector2.new(searchX + 10, searchY + 10)
+        table.insert(els, searchIcon)
+        
+        local searchDisplayText = Options.searchQuery == "" and "Search keybinds..." or Options.searchQuery
+        if Options.searchFocused then
+            local cursor = (os_clock() % 0.7) > 0.35 and "|" or ""
+            searchDisplayText = Options.searchQuery .. cursor
+        end
+        
+        local searchText = Drawing.new("Text")
+        searchText.Visible = true
+        searchText.Text = searchDisplayText
+        searchText.Size = 12
+        searchText.Color = Options.searchQuery == "" and not Options.searchFocused and Theme.TextMuted or Theme.TextPrimary
+        searchText.Outline = true
+        searchText.Position = Vector2.new(searchX + 26, searchY + 11)
+        table.insert(els, searchText)
+        
+        local itemsStartY = searchY + searchH + 10
+        
         local items = getOptionsFiltered()
         local maxScroll = optionsMaxScroll()
         Options.scrollOffset = math.clamp(Options.scrollOffset, 0, maxScroll)
-        
         local startIdx = math.floor(Options.scrollOffset) + 1
         local endIdx = math.min(startIdx + Options.VISIBLE - 1, #items)
-        
         local contentH = Options.VISIBLE * (Options.ITEM_H + 4) - 4
         
-        for i = startIdx, endIdx do
-            local cmd = items[i]
-            local localIdx = i - startIdx
-            local itemY = contentStartY + localIdx * (Options.ITEM_H + 4)
-            
-            local itemBg = Drawing.new("Square")
-            itemBg.Visible = true
-            itemBg.Filled = true
-            itemBg.Color = Theme.Card
-            itemBg.Rounding = 6
-            itemBg.Position = Vector2.new(px + Options.PAD, itemY)
-            itemBg.Size = Vector2.new(Options.W - Options.PAD * 2 - 15, Options.ITEM_H - 4)
-            table.insert(els, itemBg)
-            
-            local dot = Drawing.new("Circle")
-            dot.Visible = true
-            dot.Filled = true
-            dot.Color = catColor(cmd.cat)
-            dot.NumSides = 12
-            dot.Position = Vector2.new(px + Options.PAD + 18, itemY + Options.ITEM_H / 2 - 2)
-            dot.Radius = 5
-            table.insert(els, dot)
-            
-            local cmdName = Drawing.new("Text")
-            cmdName.Visible = true
-            cmdName.Text = cmd.name
-            cmdName.Size = 13
-            cmdName.Color = Theme.TextPrimary
-            cmdName.Outline = true
-            cmdName.Position = Vector2.new(px + Options.PAD + 35, itemY + 10)
-            table.insert(els, cmdName)
-            
-            local desc = Drawing.new("Text")
-            desc.Visible = true
-            desc.Text = cmd.desc
-            desc.Size = 10
-            desc.Color = Theme.TextSecondary
-            desc.Outline = true
-            desc.Position = Vector2.new(px + Options.PAD + 35, itemY + 28)
-            table.insert(els, desc)
-            
-            local currentKey = getKeybindForCommand(cmd.name)
-            local keyText = currentKey and formatKeyName(currentKey) or "NONE"
-            local isWaiting = (Keybinds.settingFor == cmd.name)
-            if isWaiting then keyText = "..." end
-            
-            local keyBtnW = 70
-            local keyBtnX = px + Options.W - Options.PAD - keyBtnW - 20
-            
-            local keyBtn = Drawing.new("Square")
-            keyBtn.Visible = true
-            keyBtn.Filled = true
-            keyBtn.Color = isWaiting and Theme.Accent or Theme.Tertiary
-            keyBtn.Rounding = 4
-            keyBtn.Position = Vector2.new(keyBtnX, itemY + 12)
-            keyBtn.Size = Vector2.new(keyBtnW, 28)
-            table.insert(els, keyBtn)
-            
-            local keyLabel = Drawing.new("Text")
-            keyLabel.Visible = true
-            keyLabel.Text = keyText
-            keyLabel.Size = 10
-            keyLabel.Color = isWaiting and Theme.Primary or Theme.TextPrimary
-            keyLabel.Outline = not isWaiting
-            keyLabel.Center = true
-            keyLabel.Position = Vector2.new(keyBtnX + keyBtnW / 2, itemY + 21)
-            table.insert(els, keyLabel)
-            
-            table.insert(Options.keybindItems, {
-                cmd = cmd,
-                bounds = {pos = Vector2.new(keyBtnX, itemY + 12), size = Vector2.new(keyBtnW, 28)}
-            })
+        if #items == 0 then
+            local noResults = Drawing.new("Text")
+            noResults.Visible = true
+            noResults.Text = "No keybinds found"
+            noResults.Size = 14
+            noResults.Color = Theme.TextMuted
+            noResults.Outline = true
+            noResults.Center = true
+            noResults.Position = Vector2.new(px + Options.W / 2, itemsStartY + 50)
+            table.insert(els, noResults)
+        else
+            for i = startIdx, endIdx do
+                local cmd = items[i]
+                local localIdx = i - startIdx
+                local itemY = itemsStartY + localIdx * (Options.ITEM_H + 4)
+                local itemH = Options.ITEM_H - 4
+                
+                local itemBg = Drawing.new("Square")
+                itemBg.Visible = true
+                itemBg.Filled = true
+                itemBg.Color = Theme.Card
+                itemBg.Rounding = 6
+                itemBg.Position = Vector2.new(px + Options.PAD, itemY)
+                itemBg.Size = Vector2.new(Options.W - Options.PAD * 2 - 15, itemH)
+                table.insert(els, itemBg)
+                
+                local dot = Drawing.new("Circle")
+                dot.Visible = true
+                dot.Filled = true
+                dot.Color = catColor(cmd.cat)
+                dot.NumSides = 12
+                dot.Position = Vector2.new(px + Options.PAD + 18, itemY + itemH / 2)
+                dot.Radius = 5
+                table.insert(els, dot)
+                
+                local cmdNameText = Drawing.new("Text")
+                cmdNameText.Visible = true
+                cmdNameText.Text = cmd.name
+                cmdNameText.Size = 13
+                cmdNameText.Color = Theme.TextPrimary
+                cmdNameText.Outline = true
+                cmdNameText.Position = Vector2.new(px + Options.PAD + 35, itemY + itemH / 2 - 16)
+                table.insert(els, cmdNameText)
+                
+                local desc = Drawing.new("Text")
+                desc.Visible = true
+                desc.Text = cmd.desc
+                desc.Size = 10
+                desc.Color = Theme.TextSecondary
+                desc.Outline = true
+                desc.Position = Vector2.new(px + Options.PAD + 35, itemY + itemH / 2 + 2)
+                table.insert(els, desc)
+                
+                local currentKey, _ = getKeybindForCommand(cmd.name)
+                local currentMode = getModeForCommand(cmd.name)
+                local keyText = currentKey and formatKeyName(currentKey) or "NONE"
+                local isWaiting = (Keybinds.settingFor == cmd.name)
+                if isWaiting then keyText = "..." end
+                
+                local modeBtnW = 55
+                local keyBtnW = 70
+                local btnGap = 12
+                local keyBtnX = px + Options.W - Options.PAD - keyBtnW - 20
+                local modeBtnX = keyBtnX - modeBtnW - btnGap
+                local btnY = itemY + itemH / 2 - 12
+                local isHold = currentMode == "hold"
+                
+                local modeBtn = Drawing.new("Square")
+                modeBtn.Visible = true
+                modeBtn.Filled = true
+                modeBtn.Color = Theme.Tertiary
+                modeBtn.Rounding = 4
+                modeBtn.Position = Vector2.new(modeBtnX, btnY)
+                modeBtn.Size = Vector2.new(modeBtnW, 24)
+                table.insert(els, modeBtn)
+                
+                local modeLabel = Drawing.new("Text")
+                modeLabel.Visible = true
+                modeLabel.Text = isHold and "HOLD" or "TOGGLE"
+                modeLabel.Size = 9
+                modeLabel.Color = Theme.TextPrimary
+                modeLabel.Outline = true
+                modeLabel.Center = true
+                modeLabel.Position = Vector2.new(modeBtnX + modeBtnW / 2, btnY + 7)
+                table.insert(els, modeLabel)
+                
+                local keyBtn = Drawing.new("Square")
+                keyBtn.Visible = true
+                keyBtn.Filled = true
+                keyBtn.Color = isWaiting and Theme.Accent or Theme.Tertiary
+                keyBtn.Rounding = 4
+                keyBtn.Position = Vector2.new(keyBtnX, btnY)
+                keyBtn.Size = Vector2.new(keyBtnW, 24)
+                table.insert(els, keyBtn)
+                
+                local keyLabel = Drawing.new("Text")
+                keyLabel.Visible = true
+                keyLabel.Text = keyText
+                keyLabel.Size = 10
+                keyLabel.Color = isWaiting and Theme.Primary or Theme.TextPrimary
+                keyLabel.Outline = not isWaiting
+                keyLabel.Center = true
+                keyLabel.Position = Vector2.new(keyBtnX + keyBtnW / 2, btnY + 7)
+                table.insert(els, keyLabel)
+                
+                table.insert(Options.keybindItems, {
+                    cmd = cmd, 
+                    keyBounds = {pos = Vector2.new(keyBtnX, btnY), size = Vector2.new(keyBtnW, 24)},
+                    modeBounds = {pos = Vector2.new(modeBtnX, btnY), size = Vector2.new(modeBtnW, 24)},
+                    currentMode = currentMode
+                })
+            end
         end
         
         if maxScroll > 0 then
             local scrollbarX = px + Options.W - Options.PAD - 8
-            local scrollbarY = contentStartY
+            local scrollbarY = itemsStartY
             local scrollbarH = contentH
             local thumbH = math.max(30, scrollbarH * (Options.VISIBLE / #items))
             local thumbY = scrollbarY + (Options.scrollOffset / maxScroll) * (scrollbarH - thumbH)
@@ -2185,12 +3037,7 @@ local function createOptions()
             scrollThumb.Size = Vector2.new(5, thumbH)
             table.insert(els, scrollThumb)
             
-            Options.scrollBounds = {
-                pos = Vector2.new(scrollbarX, scrollbarY),
-                size = Vector2.new(5, scrollbarH),
-                thumbH = thumbH,
-                maxScroll = maxScroll
-            }
+            Options.scrollBounds = {pos = Vector2.new(scrollbarX, scrollbarY), size = Vector2.new(5, scrollbarH), thumbH = thumbH, maxScroll = maxScroll}
         else
             Options.scrollBounds = {pos = Vector2.new(0,0), size = Vector2.new(0,0)}
         end
@@ -2229,18 +3076,16 @@ local function createOptions()
         local gridY = subTabY + 40
         local itemW = 85
         local itemH = 50
-        local gap = 10
+        local gapTheme = 10
         local cols = 6
         
         if Options.themeTab == "accent" then
             Options.themeItems = {}
-            
             for i, preset in accentPresets do
                 local col = (i - 1) % cols
                 local row = math.floor((i - 1) / cols)
-                local itemX = px + Options.PAD + col * (itemW + gap)
-                local itemY = gridY + row * (itemH + gap)
-                
+                local itemX = px + Options.PAD + col * (itemW + gapTheme)
+                local itemYPos = gridY + row * (itemH + gapTheme)
                 local isSelected = (Theme.Accent.R == preset.accent.R and Theme.Accent.G == preset.accent.G and Theme.Accent.B == preset.accent.B)
                 
                 local bg = Drawing.new("Square")
@@ -2248,7 +3093,7 @@ local function createOptions()
                 bg.Filled = true
                 bg.Color = isSelected and Theme.Tertiary or Theme.Card
                 bg.Rounding = 6
-                bg.Position = Vector2.new(itemX, itemY)
+                bg.Position = Vector2.new(itemX, itemYPos)
                 bg.Size = Vector2.new(itemW, itemH)
                 table.insert(els, bg)
                 
@@ -2259,7 +3104,7 @@ local function createOptions()
                     selBorder.Color = preset.accent
                     selBorder.Rounding = 6
                     selBorder.Thickness = 2
-                    selBorder.Position = Vector2.new(itemX, itemY)
+                    selBorder.Position = Vector2.new(itemX, itemYPos)
                     selBorder.Size = Vector2.new(itemW, itemH)
                     table.insert(els, selBorder)
                 end
@@ -2269,34 +3114,29 @@ local function createOptions()
                 preview.Filled = true
                 preview.Color = preset.accent
                 preview.Rounding = 4
-                preview.Position = Vector2.new(itemX + 8, itemY + 8)
+                preview.Position = Vector2.new(itemX + 8, itemYPos + 8)
                 preview.Size = Vector2.new(itemW - 16, 20)
                 table.insert(els, preview)
                 
-                local name = Drawing.new("Text")
-                name.Visible = true
-                name.Text = preset.name
-                name.Size = 10
-                name.Color = Theme.TextSecondary
-                name.Outline = true
-                name.Center = true
-                name.Position = Vector2.new(itemX + itemW / 2, itemY + 34)
-                table.insert(els, name)
+                local nameText = Drawing.new("Text")
+                nameText.Visible = true
+                nameText.Text = preset.name
+                nameText.Size = 10
+                nameText.Color = Theme.TextSecondary
+                nameText.Outline = true
+                nameText.Center = true
+                nameText.Position = Vector2.new(itemX + itemW / 2, itemYPos + 34)
+                table.insert(els, nameText)
                 
-                table.insert(Options.themeItems, {
-                    preset = preset,
-                    bounds = {pos = Vector2.new(itemX, itemY), size = Vector2.new(itemW, itemH)}
-                })
+                table.insert(Options.themeItems, {preset = preset, bounds = {pos = Vector2.new(itemX, itemYPos), size = Vector2.new(itemW, itemH)}})
             end
         else
             Options.fillItems = {}
-            
             for i, preset in fillPresets do
                 local col = (i - 1) % cols
                 local row = math.floor((i - 1) / cols)
-                local itemX = px + Options.PAD + col * (itemW + gap)
-                local itemY = gridY + row * (itemH + gap)
-                
+                local itemX = px + Options.PAD + col * (itemW + gapTheme)
+                local itemYPos = gridY + row * (itemH + gapTheme)
                 local isSelected = (Theme.Primary.R == preset.primary.R and Theme.Primary.G == preset.primary.G and Theme.Primary.B == preset.primary.B)
                 
                 local bg = Drawing.new("Square")
@@ -2304,7 +3144,7 @@ local function createOptions()
                 bg.Filled = true
                 bg.Color = isSelected and Theme.Tertiary or Theme.Card
                 bg.Rounding = 6
-                bg.Position = Vector2.new(itemX, itemY)
+                bg.Position = Vector2.new(itemX, itemYPos)
                 bg.Size = Vector2.new(itemW, itemH)
                 table.insert(els, bg)
                 
@@ -2315,26 +3155,27 @@ local function createOptions()
                     selBorder.Color = Theme.Accent
                     selBorder.Rounding = 6
                     selBorder.Thickness = 2
-                    selBorder.Position = Vector2.new(itemX, itemY)
+                    selBorder.Position = Vector2.new(itemX, itemYPos)
                     selBorder.Size = Vector2.new(itemW, itemH)
                     table.insert(els, selBorder)
                 end
                 
+                local pw = (itemW - 16) / 3
                 local preview1 = Drawing.new("Square")
                 preview1.Visible = true
                 preview1.Filled = true
                 preview1.Color = preset.primary
                 preview1.Rounding = 4
-                preview1.Position = Vector2.new(itemX + 8, itemY + 8)
-                preview1.Size = Vector2.new((itemW - 16) / 3, 20)
+                preview1.Position = Vector2.new(itemX + 8, itemYPos + 8)
+                preview1.Size = Vector2.new(pw, 20)
                 table.insert(els, preview1)
                 
                 local preview2 = Drawing.new("Square")
                 preview2.Visible = true
                 preview2.Filled = true
                 preview2.Color = preset.secondary
-                preview2.Position = Vector2.new(itemX + 8 + (itemW - 16) / 3, itemY + 8)
-                preview2.Size = Vector2.new((itemW - 16) / 3, 20)
+                preview2.Position = Vector2.new(itemX + 8 + pw, itemYPos + 8)
+                preview2.Size = Vector2.new(pw, 20)
                 table.insert(els, preview2)
                 
                 local preview3 = Drawing.new("Square")
@@ -2342,56 +3183,111 @@ local function createOptions()
                 preview3.Filled = true
                 preview3.Color = preset.tertiary
                 preview3.Rounding = 4
-                preview3.Position = Vector2.new(itemX + 8 + 2 * (itemW - 16) / 3, itemY + 8)
-                preview3.Size = Vector2.new((itemW - 16) / 3, 20)
+                preview3.Position = Vector2.new(itemX + 8 + pw * 2, itemYPos + 8)
+                preview3.Size = Vector2.new(pw, 20)
                 table.insert(els, preview3)
                 
-                local name = Drawing.new("Text")
-                name.Visible = true
-                name.Text = preset.name
-                name.Size = 10
-                name.Color = Theme.TextSecondary
-                name.Outline = true
-                name.Center = true
-                name.Position = Vector2.new(itemX + itemW / 2, itemY + 34)
-                table.insert(els, name)
+                local nameText = Drawing.new("Text")
+                nameText.Visible = true
+                nameText.Text = preset.name
+                nameText.Size = 10
+                nameText.Color = Theme.TextSecondary
+                nameText.Outline = true
+                nameText.Center = true
+                nameText.Position = Vector2.new(itemX + itemW / 2, itemYPos + 34)
+                table.insert(els, nameText)
                 
-                table.insert(Options.fillItems, {
-                    preset = preset,
-                    bounds = {pos = Vector2.new(itemX, itemY), size = Vector2.new(itemW, itemH)}
-                })
+                table.insert(Options.fillItems, {preset = preset, bounds = {pos = Vector2.new(itemX, itemYPos), size = Vector2.new(itemW, itemH)}})
             end
         end
         
     elseif Options.tab == "general" then
         local settingY = contentStartY
+        local settingH = 60
+        local settingGap = 10
+        local toggleW = 50
+        local toggleH = 26
+        local toggleX = px + Options.W - Options.PAD - toggleW - 15
         
-        local keySettingBg = Drawing.new("Square")
-        keySettingBg.Visible = true
-        keySettingBg.Filled = true
-        keySettingBg.Color = Theme.Card
-        keySettingBg.Rounding = 6
-        keySettingBg.Position = Vector2.new(px + Options.PAD, settingY)
-        keySettingBg.Size = Vector2.new(Options.W - Options.PAD * 2, 60)
-        table.insert(els, keySettingBg)
+        local function drawSetting(label, desc, itemId, isEnabled, yPos)
+            local bg = Drawing.new("Square")
+            bg.Visible = true
+            bg.Filled = true
+            bg.Color = Theme.Card
+            bg.Rounding = 6
+            bg.Position = Vector2.new(px + Options.PAD, yPos)
+            bg.Size = Vector2.new(Options.W - Options.PAD * 2, settingH)
+            table.insert(els, bg)
+            
+            local labelText = Drawing.new("Text")
+            labelText.Visible = true
+            labelText.Text = label
+            labelText.Size = 14
+            labelText.Color = Theme.TextPrimary
+            labelText.Outline = true
+            labelText.Position = Vector2.new(px + Options.PAD + 15, yPos + 12)
+            table.insert(els, labelText)
+            
+            local descText = Drawing.new("Text")
+            descText.Visible = true
+            descText.Text = desc
+            descText.Size = 10
+            descText.Color = Theme.TextSecondary
+            descText.Outline = true
+            descText.Position = Vector2.new(px + Options.PAD + 15, yPos + 32)
+            table.insert(els, descText)
+            
+            local toggleY = yPos + 17
+            
+            local toggleBg = Drawing.new("Square")
+            toggleBg.Visible = true
+            toggleBg.Filled = true
+            toggleBg.Color = isEnabled and Theme.Accent or Theme.Tertiary
+            toggleBg.Rounding = 13
+            toggleBg.Position = Vector2.new(toggleX, toggleY)
+            toggleBg.Size = Vector2.new(toggleW, toggleH)
+            table.insert(els, toggleBg)
+            
+            local knobX = isEnabled and (toggleX + toggleW - 22) or (toggleX + 4)
+            local knob = Drawing.new("Circle")
+            knob.Visible = true
+            knob.Filled = true
+            knob.Color = Theme.TextPrimary
+            knob.NumSides = 16
+            knob.Position = Vector2.new(knobX + 9, toggleY + 13)
+            knob.Radius = 9
+            table.insert(els, knob)
+            
+            table.insert(Options.generalItems, {id = itemId, bounds = {pos = Vector2.new(toggleX, toggleY), size = Vector2.new(toggleW, toggleH)}})
+        end
         
-        local keySettingLabel = Drawing.new("Text")
-        keySettingLabel.Visible = true
-        keySettingLabel.Text = "Command Bar Key"
-        keySettingLabel.Size = 14
-        keySettingLabel.Color = Theme.TextPrimary
-        keySettingLabel.Outline = true
-        keySettingLabel.Position = Vector2.new(px + Options.PAD + 15, settingY + 12)
-        table.insert(els, keySettingLabel)
+        -- Command bar key
+        local keyBg = Drawing.new("Square")
+        keyBg.Visible = true
+        keyBg.Filled = true
+        keyBg.Color = Theme.Card
+        keyBg.Rounding = 6
+        keyBg.Position = Vector2.new(px + Options.PAD, settingY)
+        keyBg.Size = Vector2.new(Options.W - Options.PAD * 2, settingH)
+        table.insert(els, keyBg)
         
-        local keySettingDesc = Drawing.new("Text")
-        keySettingDesc.Visible = true
-        keySettingDesc.Text = "Press to open command bar"
-        keySettingDesc.Size = 10
-        keySettingDesc.Color = Theme.TextSecondary
-        keySettingDesc.Outline = true
-        keySettingDesc.Position = Vector2.new(px + Options.PAD + 15, settingY + 32)
-        table.insert(els, keySettingDesc)
+        local keyLabel = Drawing.new("Text")
+        keyLabel.Visible = true
+        keyLabel.Text = "Command Bar Key"
+        keyLabel.Size = 14
+        keyLabel.Color = Theme.TextPrimary
+        keyLabel.Outline = true
+        keyLabel.Position = Vector2.new(px + Options.PAD + 15, settingY + 12)
+        table.insert(els, keyLabel)
+        
+        local keyDesc = Drawing.new("Text")
+        keyDesc.Visible = true
+        keyDesc.Text = "Press to open command bar"
+        keyDesc.Size = 10
+        keyDesc.Color = Theme.TextSecondary
+        keyDesc.Outline = true
+        keyDesc.Position = Vector2.new(px + Options.PAD + 15, settingY + 32)
+        table.insert(els, keyDesc)
         
         local keyBtnW = 80
         local keyBtnX = px + Options.W - Options.PAD - keyBtnW - 15
@@ -2406,64 +3302,152 @@ local function createOptions()
         keyBtn.Size = Vector2.new(keyBtnW, 28)
         table.insert(els, keyBtn)
         
-        local keyText = isSettingKey and "..." or formatKeyName(Settings.commandBarKey)
-        local keyLabel = Drawing.new("Text")
-        keyLabel.Visible = true
-        keyLabel.Text = keyText
-        keyLabel.Size = 12
-        keyLabel.Color = isSettingKey and Theme.Primary or Theme.TextPrimary
-        keyLabel.Outline = not isSettingKey
-        keyLabel.Center = true
-        keyLabel.Position = Vector2.new(keyBtnX + keyBtnW / 2, settingY + 25)
-        table.insert(els, keyLabel)
+        local keyBtnText = Drawing.new("Text")
+        keyBtnText.Visible = true
+        keyBtnText.Text = isSettingKey and "..." or formatKeyName(Settings.commandBarKey)
+        keyBtnText.Size = 12
+        keyBtnText.Color = isSettingKey and Theme.Primary or Theme.TextPrimary
+        keyBtnText.Outline = not isSettingKey
+        keyBtnText.Center = true
+        keyBtnText.Position = Vector2.new(keyBtnX + keyBtnW / 2, settingY + 25)
+        table.insert(els, keyBtnText)
         
-        table.insert(Options.generalItems, {
-            id = "commandBarKey",
-            bounds = {pos = Vector2.new(keyBtnX, settingY + 16), size = Vector2.new(keyBtnW, 28)}
-        })
+        table.insert(Options.generalItems, {id = "commandBarKey", bounds = {pos = Vector2.new(keyBtnX, settingY + 16), size = Vector2.new(keyBtnW, 28)}})
         
-        settingY = settingY + 80
+        settingY = settingY + settingH + settingGap
+        drawSetting("Hide Username", "Shows 'Anonymous' in command panel", "hideUsername", Settings.hideUsername, settingY)
         
-        local infoLabel = Drawing.new("Text")
-        infoLabel.Visible = true
-        infoLabel.Text = "About"
-        infoLabel.Size = 14
-        infoLabel.Color = Theme.TextPrimary
-        infoLabel.Outline = true
-        infoLabel.Position = Vector2.new(px + Options.PAD, settingY)
-        table.insert(els, infoLabel)
+        settingY = settingY + settingH + settingGap
+        drawSetting("Watermark", "Show watermark with FPS and ping", "watermark", Settings.watermarkEnabled, settingY)
         
-        settingY = settingY + 25
+        settingY = settingY + settingH + settingGap
+        drawSetting("Status Bar", "Show active features indicator", "statusBar", Settings.statusBarEnabled, settingY)
         
-        local infoBg = Drawing.new("Square")
-        infoBg.Visible = true
-        infoBg.Filled = true
-        infoBg.Color = Theme.Card
-        infoBg.Rounding = 6
-        infoBg.Position = Vector2.new(px + Options.PAD, settingY)
-        infoBg.Size = Vector2.new(Options.W - Options.PAD * 2, 100)
-        table.insert(els, infoBg)
+        settingY = settingY + settingH + settingGap
         
-        local infoLines = {
-            "Severe Admin Panel v3.0",
-            "External Roblox Admin",
-            "",
-            "Press " .. formatKeyName(Settings.commandBarKey) .. " to open command bar",
-            "Use ;cmds to see all commands"
-        }
+        -- Corner selection
+        local cornerBg = Drawing.new("Square")
+        cornerBg.Visible = true
+        cornerBg.Filled = true
+        cornerBg.Color = Theme.Card
+        cornerBg.Rounding = 6
+        cornerBg.Position = Vector2.new(px + Options.PAD, settingY)
+        cornerBg.Size = Vector2.new(Options.W - Options.PAD * 2, settingH)
+        table.insert(els, cornerBg)
         
-        for i, line in infoLines do
-            local infoText = Drawing.new("Text")
-            infoText.Visible = true
-            infoText.Text = line
-            infoText.Size = 11
-            infoText.Color = i == 1 and Theme.Accent or Theme.TextSecondary
-            infoText.Outline = true
-            infoText.Position = Vector2.new(px + Options.PAD + 15, settingY + 10 + (i - 1) * 18)
-            table.insert(els, infoText)
+        local cornerLabel = Drawing.new("Text")
+        cornerLabel.Visible = true
+        cornerLabel.Text = "Status Bar Position"
+        cornerLabel.Size = 14
+        cornerLabel.Color = Theme.TextPrimary
+        cornerLabel.Outline = true
+        cornerLabel.Position = Vector2.new(px + Options.PAD + 15, settingY + 12)
+        table.insert(els, cornerLabel)
+        
+        local cornerDesc = Drawing.new("Text")
+        cornerDesc.Visible = true
+        cornerDesc.Text = "Choose screen corner"
+        cornerDesc.Size = 10
+        cornerDesc.Color = Theme.TextSecondary
+        cornerDesc.Outline = true
+        cornerDesc.Position = Vector2.new(px + Options.PAD + 15, settingY + 32)
+        table.insert(els, cornerDesc)
+        
+        local corners = {"top-left", "top-right", "bottom-left", "bottom-right"}
+        local cornerLabels = {"TL", "TR", "BL", "BR"}
+        local cornerBtnW = 36
+        local cornerBtnGap = 6
+        local cornerStartX = px + Options.W - Options.PAD - (cornerBtnW * 4 + cornerBtnGap * 3) - 15
+        
+        for i, corner in corners do
+            local btnX = cornerStartX + (i - 1) * (cornerBtnW + cornerBtnGap)
+            local isSelected = Settings.statusBarCorner == corner
+            
+            local btn = Drawing.new("Square")
+            btn.Visible = true
+            btn.Filled = true
+            btn.Color = isSelected and Theme.Accent or Theme.Tertiary
+            btn.Rounding = 4
+            btn.Position = Vector2.new(btnX, settingY + 16)
+            btn.Size = Vector2.new(cornerBtnW, 28)
+            table.insert(els, btn)
+            
+            local btnText = Drawing.new("Text")
+            btnText.Visible = true
+            btnText.Text = cornerLabels[i]
+            btnText.Size = 10
+            btnText.Color = isSelected and Theme.Primary or Theme.TextPrimary
+            btnText.Outline = not isSelected
+            btnText.Center = true
+            btnText.Position = Vector2.new(btnX + cornerBtnW / 2, settingY + 25)
+            table.insert(els, btnText)
+            
+            table.insert(Options.generalItems, {id = "corner_" .. corner, bounds = {pos = Vector2.new(btnX, settingY + 16), size = Vector2.new(cornerBtnW, 28)}})
+        end
+        
+        settingY = settingY + settingH + settingGap
+        
+        -- Orientation
+        local orientBg = Drawing.new("Square")
+        orientBg.Visible = true
+        orientBg.Filled = true
+        orientBg.Color = Theme.Card
+        orientBg.Rounding = 6
+        orientBg.Position = Vector2.new(px + Options.PAD, settingY)
+        orientBg.Size = Vector2.new(Options.W - Options.PAD * 2, settingH)
+        table.insert(els, orientBg)
+        
+        local orientLabel = Drawing.new("Text")
+        orientLabel.Visible = true
+        orientLabel.Text = "Status Bar Layout"
+        orientLabel.Size = 14
+        orientLabel.Color = Theme.TextPrimary
+        orientLabel.Outline = true
+        orientLabel.Position = Vector2.new(px + Options.PAD + 15, settingY + 12)
+        table.insert(els, orientLabel)
+        
+        local orientDesc = Drawing.new("Text")
+        orientDesc.Visible = true
+        orientDesc.Text = "Horizontal or vertical"
+        orientDesc.Size = 10
+        orientDesc.Color = Theme.TextSecondary
+        orientDesc.Outline = true
+        orientDesc.Position = Vector2.new(px + Options.PAD + 15, settingY + 32)
+        table.insert(els, orientDesc)
+        
+        local orientations = {"horizontal", "vertical"}
+        local orientLabels = {"Horizontal", "Vertical"}
+        local orientBtnW = 80
+        local orientStartX = px + Options.W - Options.PAD - (orientBtnW * 2 + 8) - 15
+        
+        for i, orient in orientations do
+            local btnX = orientStartX + (i - 1) * (orientBtnW + 8)
+            local isSelected = Settings.statusBarOrientation == orient
+            
+            local btn = Drawing.new("Square")
+            btn.Visible = true
+            btn.Filled = true
+            btn.Color = isSelected and Theme.Accent or Theme.Tertiary
+            btn.Rounding = 4
+            btn.Position = Vector2.new(btnX, settingY + 16)
+            btn.Size = Vector2.new(orientBtnW, 28)
+            table.insert(els, btn)
+            
+            local btnText = Drawing.new("Text")
+            btnText.Visible = true
+            btnText.Text = orientLabels[i]
+            btnText.Size = 10
+            btnText.Color = isSelected and Theme.Primary or Theme.TextPrimary
+            btnText.Outline = not isSelected
+            btnText.Center = true
+            btnText.Position = Vector2.new(btnX + orientBtnW / 2, settingY + 25)
+            table.insert(els, btnText)
+            
+            table.insert(Options.generalItems, {id = "orient_" .. orient, bounds = {pos = Vector2.new(btnX, settingY + 16), size = Vector2.new(orientBtnW, 28)}})
         end
     end
     
+    -- Footer
     local fY = py + Options.H - Options.FOOTER_H + 4
     local fLine = Drawing.new("Square")
     fLine.Visible = true
@@ -2475,11 +3459,11 @@ local function createOptions()
     
     local fHint = Drawing.new("Text")
     fHint.Visible = true
-    fHint.Text = "Drag header to move • ESC to close"
+    fHint.Text = "Drag header to move • Click X to close"
     fHint.Size = 10
     fHint.Color = Theme.TextMuted
     fHint.Outline = true
-    fHint.Position = Vector2.new(px + Options.W - 210, fY)
+    fHint.Position = Vector2.new(px + Options.W - 220, fY)
     table.insert(els, fHint)
     
     Options.needsRedraw = false
@@ -2541,16 +3525,16 @@ local function createKeybindsGui()
     hFix.Size = Vector2.new(KeybindsGui.W, 12)
     table.insert(els, hFix)
     
-    local title = Drawing.new("Text")
-    title.Visible = true
-    title.Text = "Active Features"
-    title.Size = 13
-    title.Color = Theme.TextPrimary
-    title.Outline = true
-    title.Position = Vector2.new(px + 12, py + 11)
-    table.insert(els, title)
+    local titleKb = Drawing.new("Text")
+    titleKb.Visible = true
+    titleKb.Text = "Active Features"
+    titleKb.Size = 13
+    titleKb.Color = Theme.TextPrimary
+    titleKb.Outline = true
+    titleKb.Position = Vector2.new(px + 12, py + 11)
+    table.insert(els, titleKb)
     
-    local contentY = py + KeybindsGui.HEADER + 10
+    local contentYKb = py + KeybindsGui.HEADER + 10
     
     if #features == 0 then
         local noFeatures = Drawing.new("Text")
@@ -2560,51 +3544,53 @@ local function createKeybindsGui()
         noFeatures.Color = Theme.TextMuted
         noFeatures.Outline = true
         noFeatures.Center = true
-        noFeatures.Position = Vector2.new(px + KeybindsGui.W / 2, contentY + 5)
+        noFeatures.Position = Vector2.new(px + KeybindsGui.W / 2, contentYKb + 5)
         table.insert(els, noFeatures)
     else
         for i, feature in features do
-            local itemY = contentY + (i - 1) * 36
+            local itemYKb = contentYKb + (i - 1) * 36
             
-            local itemBg = Drawing.new("Square")
-            itemBg.Visible = true
-            itemBg.Filled = true
-            itemBg.Color = Theme.Card
-            itemBg.Rounding = 6
-            itemBg.Position = Vector2.new(px + 8, itemY)
-            itemBg.Size = Vector2.new(KeybindsGui.W - 16, 32)
-            table.insert(els, itemBg)
+            local itemBgKb = Drawing.new("Square")
+            itemBgKb.Visible = true
+            itemBgKb.Filled = true
+            itemBgKb.Color = Theme.Card
+            itemBgKb.Rounding = 6
+            itemBgKb.Position = Vector2.new(px + 8, itemYKb)
+            itemBgKb.Size = Vector2.new(KeybindsGui.W - 16, 32)
+            table.insert(els, itemBgKb)
             
-            table.insert(KeybindsGui.itemBounds, {pos = Vector2.new(px + 8, itemY), size = Vector2.new(KeybindsGui.W - 16, 32), cmd = feature.cmd})
+            table.insert(KeybindsGui.itemBounds, {pos = Vector2.new(px + 8, itemYKb), size = Vector2.new(KeybindsGui.W - 16, 32), cmd = feature.cmd})
             
-            local accent = Drawing.new("Square")
-            accent.Visible = true
-            accent.Filled = true
-            accent.Color = feature.color
-            accent.Rounding = 6
-            accent.Position = Vector2.new(px + 8, itemY)
-            accent.Size = Vector2.new(4, 32)
-            table.insert(els, accent)
+            local accentKb = Drawing.new("Square")
+            accentKb.Visible = true
+            accentKb.Filled = true
+            accentKb.Color = feature.color
+            accentKb.Rounding = 6
+            accentKb.Position = Vector2.new(px + 8, itemYKb)
+            accentKb.Size = Vector2.new(4, 32)
+            table.insert(els, accentKb)
             
-            local indicator = Drawing.new("Circle")
-            indicator.Visible = true
-            indicator.Filled = true
-            indicator.Color = Theme.Success
-            indicator.NumSides = 12
-            indicator.Position = Vector2.new(px + 24, itemY + 16)
-            indicator.Radius = 4
-            table.insert(els, indicator)
+            local indicatorKb = Drawing.new("Circle")
+            indicatorKb.Visible = true
+            indicatorKb.Filled = true
+            indicatorKb.Color = Theme.Success
+            indicatorKb.NumSides = 12
+            indicatorKb.Position = Vector2.new(px + 24, itemYKb + 16)
+            indicatorKb.Radius = 4
+            table.insert(els, indicatorKb)
             
-            local nameText = Drawing.new("Text")
-            nameText.Visible = true
-            nameText.Text = feature.name
-            nameText.Size = 11
-            nameText.Color = Theme.TextPrimary
-            nameText.Outline = true
-            nameText.Position = Vector2.new(px + 36, itemY + 9)
-            table.insert(els, nameText)
+            local nameTextKb = Drawing.new("Text")
+            nameTextKb.Visible = true
+            nameTextKb.Text = feature.name
+            nameTextKb.Size = 11
+            nameTextKb.Color = Theme.TextPrimary
+            nameTextKb.Outline = true
+            nameTextKb.Position = Vector2.new(px + 36, itemYKb + 9)
+            table.insert(els, nameTextKb)
         end
     end
+    
+    KeybindsGui.needsRedraw = false
 end
 
 local function createServerInfo()
@@ -2656,27 +3642,30 @@ local function createServerInfo()
     headerFix.Size = Vector2.new(W, 14)
     table.insert(els, headerFix)
     
-    local title = Drawing.new("Text")
-    title.Visible = true
-    title.Text = "Server Information"
-    title.Size = 18
-    title.Color = Theme.TextPrimary
-    title.Outline = true
-    title.Position = Vector2.new(px + 20, py + 15)
-    table.insert(els, title)
+    local titleSi = Drawing.new("Text")
+    titleSi.Visible = true
+    titleSi.Text = "Server Information"
+    titleSi.Size = 18
+    titleSi.Color = Theme.TextPrimary
+    titleSi.Outline = true
+    titleSi.Position = Vector2.new(px + 20, py + 15)
+    table.insert(els, titleSi)
     
-    local contentY = py + 65
+    local contentYSi = py + 65
+    local displayName = Settings.hideUsername and "Anonymous" or LocalPlayer.Name
+    local displayDisplayName = Settings.hideUsername and "Anonymous" or LocalPlayer.DisplayName
+    
     local info = {
         {"Place ID", tostring(game.PlaceId or 0)},
         {"Game ID", tostring(game.GameId or 0)},
         {"Players", tostring(#Players:GetChildren())},
-        {"Username", LocalPlayer.Name},
-        {"Display Name", LocalPlayer.DisplayName},
-        {"User ID", tostring(LocalPlayer.UserId)},
+        {"Username", displayName},
+        {"Display Name", displayDisplayName},
+        {"User ID", Settings.hideUsername and "Hidden" or tostring(LocalPlayer.UserId)},
     }
     
     for i, item in info do
-        local itemY = contentY + (i - 1) * 32
+        local itemYSi = contentYSi + (i - 1) * 32
         
         local label = Drawing.new("Text")
         label.Visible = true
@@ -2684,7 +3673,7 @@ local function createServerInfo()
         label.Size = 12
         label.Color = Theme.TextSecondary
         label.Outline = true
-        label.Position = Vector2.new(px + 20, itemY)
+        label.Position = Vector2.new(px + 20, itemYSi)
         table.insert(els, label)
         
         local value = Drawing.new("Text")
@@ -2693,19 +3682,19 @@ local function createServerInfo()
         value.Size = 12
         value.Color = Theme.TextPrimary
         value.Outline = true
-        value.Position = Vector2.new(px + 150, itemY)
+        value.Position = Vector2.new(px + 150, itemYSi)
         table.insert(els, value)
     end
     
-    local hint = Drawing.new("Text")
-    hint.Visible = true
-    hint.Text = "Press ESC to close"
-    hint.Size = 10
-    hint.Color = Theme.TextMuted
-    hint.Outline = true
-    hint.Center = true
-    hint.Position = Vector2.new(px + W / 2, py + H - 25)
-    table.insert(els, hint)
+    local hintSi = Drawing.new("Text")
+    hintSi.Visible = true
+    hintSi.Text = "Press ESC to close"
+    hintSi.Size = 10
+    hintSi.Color = Theme.TextMuted
+    hintSi.Outline = true
+    hintSi.Center = true
+    hintSi.Position = Vector2.new(px + W / 2, py + H - 25)
+    table.insert(els, hintSi)
     
     ServerInfo.drawn = true
 end
@@ -2713,13 +3702,46 @@ end
 local function updateStatusBar()
     clearStatusBar()
     
+    if not Settings.statusBarEnabled then return end
     if CommandPanel.open or Bar.open or Options.open or ServerInfo.open then return end
     if not State.introComplete then return end
     
     local features = getActiveFeatures()
     if #features == 0 then return end
     
-    local barX, barY, gap = 10, 10, 6
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    
+    local vw, vh = cam.ViewportSize.X, cam.ViewportSize.Y
+    local padding = 10
+    local gap = 6
+    local itemH = 24
+    
+    local isRight = string.find(Settings.statusBarCorner, "right")
+    local isBottom = string.find(Settings.statusBarCorner, "bottom")
+    local isVertical = Settings.statusBarOrientation == "vertical"
+    
+    local totalW, totalH = 0, 0
+    if isVertical then
+        for _, feature in features do
+            local itemW = math.max(#feature.name * 6 + 20, 60)
+            totalW = math.max(totalW, itemW)
+        end
+        totalH = #features * (itemH + gap) - gap
+    else
+        for _, feature in features do
+            local itemW = math.max(#feature.name * 6 + 20, 60)
+            totalW = totalW + itemW + gap
+        end
+        totalW = totalW - gap
+        totalH = itemH
+    end
+    
+    local startX, startY
+    if isRight then startX = vw - padding - totalW else startX = padding end
+    if isBottom then startY = vh - padding - totalH else startY = padding end
+    
+    local barX, barY = startX, startY
     
     for _, feature in features do
         local itemW = math.max(#feature.name * 6 + 20, 60)
@@ -2731,7 +3753,7 @@ local function updateStatusBar()
         bg.Rounding = 4
         bg.Opacity = 0.9
         bg.Position = Vector2.new(barX, barY)
-        bg.Size = Vector2.new(itemW, 24)
+        bg.Size = Vector2.new(itemW, itemH)
         table.insert(StatusBar.elements, bg)
         
         local accent = Drawing.new("Square")
@@ -2740,7 +3762,7 @@ local function updateStatusBar()
         accent.Color = feature.color
         accent.Rounding = 4
         accent.Position = Vector2.new(barX, barY)
-        accent.Size = Vector2.new(3, 24)
+        accent.Size = Vector2.new(3, itemH)
         table.insert(StatusBar.elements, accent)
         
         local text = Drawing.new("Text")
@@ -2752,44 +3774,50 @@ local function updateStatusBar()
         text.Position = Vector2.new(barX + 10, barY + 6)
         table.insert(StatusBar.elements, text)
         
-        barX = barX + itemW + gap
+        if isVertical then barY = barY + itemH + gap else barX = barX + itemW + gap end
     end
 end
 
+-- ============================================
+-- INPUT HANDLING
+-- ============================================
 local keyMap = {
     A="a",B="b",C="c",D="d",E="e",F="f",G="g",H="h",I="i",J="j",K="k",L="l",M="m",
     N="n",O="o",P="p",Q="q",R="r",S="s",T="t",U="u",V="v",W="w",X="x",Y="y",Z="z",
     ["0"]="0",["1"]="1",["2"]="2",["3"]="3",["4"]="4",["5"]="5",["6"]="6",["7"]="7",["8"]="8",["9"]="9",
     Semicolon=";",OEM_1=";",Space=" ",Minus="-",Period=".",Comma=",",
-    Slash="/",Backslash="\\",Equals="=",LeftBracket="[",RightBracket="]",
-    Quote="'",BackQuote="`"
+    Slash="/",Backslash="\\",Equals="=",LeftBracket="[",RightBracket="]", Quote="'",BackQuote="`"
 }
 
-local function getCharFromKey(key)
-    if keyMap[key] then return keyMap[key] end
-    return nil
-end
+local function getCharFromKey(key) return keyMap[key] end
 
 local function addChar(char)
-    if Bar.open then
+    if CommandPanel.searchFocused and CommandPanel.open then
+        CommandPanel.searchQuery = CommandPanel.searchQuery .. char
+        CommandPanelDrawing.scrollOffset = 0
+        CommandPanelDrawing.needsRedraw = true
+    elseif Bar.open then
         Bar.input = Bar.input .. char
         Bar.acSelected = 0
         Bar.playerSuggestionSelected = 0
         Bar.needsRedraw = true
-    elseif Options.searchFocused then
+    elseif Options.searchFocused and Options.tab == "keybinds" then
         Options.searchQuery = Options.searchQuery .. char
         Options.targetScroll = 0
         Options.scrollOffset = 0
+        Options.filteredCache = {}
+        Options.lastSearchQuery = ""
         Options.needsRedraw = true
-    elseif CommandPanel.searchFocused then
-        CommandPanel.searchQuery = CommandPanel.searchQuery .. char
-        CommandPanelDrawing.scrollOffset = 0
-        createCommandPanelDrawing()
     end
 end
 
 local function deleteChar()
-    if Bar.open and #Bar.input > 1 then
+    if CommandPanel.searchFocused and CommandPanel.open and #CommandPanel.searchQuery > 0 then
+        CommandPanel.searchQuery = string.sub(CommandPanel.searchQuery, 1, -2)
+        CommandPanelDrawing.scrollOffset = 0
+        CommandPanelDrawing.needsRedraw = true
+        return true
+    elseif Bar.open and #Bar.input > 1 then
         Bar.input = string.sub(Bar.input, 1, -2)
         Bar.acSelected = 0
         Bar.playerSuggestionSelected = 0
@@ -2798,16 +3826,13 @@ local function deleteChar()
     elseif Bar.open and #Bar.input <= 1 then
         hideBar()
         return false
-    elseif Options.searchFocused and #Options.searchQuery > 0 then
+    elseif Options.searchFocused and Options.tab == "keybinds" and #Options.searchQuery > 0 then
         Options.searchQuery = string.sub(Options.searchQuery, 1, -2)
         Options.targetScroll = 0
         Options.scrollOffset = 0
+        Options.filteredCache = {}
+        Options.lastSearchQuery = ""
         Options.needsRedraw = true
-        return true
-    elseif CommandPanel.searchFocused and #CommandPanel.searchQuery > 0 then
-        CommandPanel.searchQuery = string.sub(CommandPanel.searchQuery, 1, -2)
-        CommandPanelDrawing.scrollOffset = 0
-        createCommandPanelDrawing()
         return true
     end
     return false
@@ -2836,28 +3861,47 @@ local function applyAC()
     end
 end
 
+local function handleScroll(delta)
+    local mPos = Vector2.new(0, 0)
+    pcall(function() mPos = UserInputService:GetMouseLocation() end)
+    
+    if CommandPanel.open and CommandPanelDrawing.contentBounds then
+        if inRect(mPos, CommandPanelDrawing.contentBounds.pos, CommandPanelDrawing.contentBounds.size) then
+            local filtered = getFilteredPanelCommands()
+            local maxScroll = math.max(0, #filtered - CommandPanelDrawing.maxVisible)
+            CommandPanelDrawing.scrollOffset = math.clamp(CommandPanelDrawing.scrollOffset - delta, 0, maxScroll)
+            CommandPanelDrawing.needsRedraw = true
+            return true
+        end
+    end
+    
+    if Options.open and Options.tab == "keybinds" then
+        Options.targetScroll = math.clamp(Options.targetScroll - delta, 0, optionsMaxScroll())
+        Options.needsRedraw = true
+        return true
+    end
+    
+    return false
+end
+
 local function updateLogic(dt)
-    checkSpawnpoint()
+    updateSpawnpoint(dt)
     updateDiedTp(dt)
     updateNoclip()
     updateInfJump()
     updateAntiVoid()
     updateFov()
     updateThirdPerson()
+    updateInstantInteract()
+    updateTeleportBypass()
     
-    if Teleport.frames > 0 and Teleport.target then
-        pcall(function()
-            local char = LocalPlayer.Character
-            if char then
-                local root = char:FindFirstChild("HumanoidRootPart")
-                if root then
-                    root.CFrame = CFrame.new(Teleport.target)
-                    root.Velocity = Vector3.new(0, 0, 0)
-                end
-            end
-        end)
-        Teleport.frames = Teleport.frames - 1
-        if Teleport.frames == 0 then Teleport.target = nil end
+    -- ClickTP cache refresh
+    if Features.clickTpEnabled then
+        local now = os_clock()
+        if now - ClickTP.LastCacheTime >= ClickTP.CACHE_REFRESH_INTERVAL then
+            ClickTP.LastCacheTime = now
+            RefreshClickTPCache()
+        end
     end
     
     Features.specTimer = Features.specTimer + dt
@@ -2876,37 +3920,10 @@ local function updateLogic(dt)
     end
 end
 
-local function handleScroll(delta)
-    local mPos = Vector2.new(0, 0)
-    pcall(function() mPos = UserInputService:GetMouseLocation() end)
-    
-    if CommandPanel.open and CommandPanelDrawing.contentBounds then
-        if inRect(mPos, CommandPanelDrawing.contentBounds.pos, CommandPanelDrawing.contentBounds.size) then
-            local filtered = getFilteredPanelCommands()
-            local maxScroll = math.max(0, #filtered - CommandPanelDrawing.maxVisible)
-            CommandPanelDrawing.scrollOffset = math.clamp(CommandPanelDrawing.scrollOffset - delta, 0, maxScroll)
-            createCommandPanelDrawing()
-            return true
-        end
-    end
-    
-    if Options.open and Options.tab == "keybinds" then
-        local contentY = Options.posY + Options.HEADER + Options.TAB_H + 25
-        local contentH = Options.VISIBLE * (Options.ITEM_H + 4)
-        local contentBounds = {pos = Vector2.new(Options.posX, contentY), size = Vector2.new(Options.W, contentH)}
-        
-        if inRect(mPos, contentBounds.pos, contentBounds.size) then
-            Options.targetScroll = math.clamp(Options.targetScroll - delta, 0, optionsMaxScroll())
-            Options.needsRedraw = true
-            return true
-        end
-    end
-    
-    return false
-end
-
 local function updateInput()
     local keys = getpressedkeys()
+    Input.currentKeys = keys
+    
     local mPos = Vector2.new(0, 0)
     pcall(function() mPos = UserInputService:GetMouseLocation() end)
     
@@ -2914,41 +3931,70 @@ local function updateInput()
     local mClick = mDown and not Input.lastMouse
     local currentTime = os_clock()
     
-    -- Handle scroll wheel
+    -- Scroll
     local scrollDelta = 0
     for _, key in keys do
         if not table.find(Input.lastKeys, key) then
-            if isKey(key, "mousewheelforward", "scrollup") then
-                scrollDelta = 1
-            elseif isKey(key, "mousewheelbackward", "scrolldown") then
-                scrollDelta = -1
+            if isKey(key, "mousewheelforward", "scrollup") then scrollDelta = 1
+            elseif isKey(key, "mousewheelbackward", "scrolldown") then scrollDelta = -1 end
+        end
+    end
+    if scrollDelta ~= 0 then handleScroll(scrollDelta) end
+    
+    -- ClickTP - Check if bound key is pressed + mouse click
+    if Features.clickTpEnabled and not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
+        local boundKey, mode = getKeybindForCommand("clicktp")
+        
+        if boundKey then
+            local keyIsDown = isKeyDown(boundKey)
+            
+            if keyIsDown and mClick then
+                performClickTP()
             end
         end
     end
     
-    if scrollDelta ~= 0 then
-        handleScroll(scrollDelta)
-    end
-    
+    -- Keybinds execution
     if not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
         for _, key in keys do
             if not table.find(Input.lastKeys, key) then
                 local keyLower = string.lower(key)
-                if Keybinds.binds[keyLower] then executeKeybind(keyLower) end
+                local data = Keybinds.binds[keyLower]
+                if data then
+                    local cmdName = type(data) == "table" and data.cmd or data
+                    -- Skip clicktp - it's handled above with mouse click
+                    if cmdName ~= "clicktp" then
+                        executeKeybind(keyLower, true)
+                    end
+                end
+            end
+        end
+        
+        for _, oldKey in Input.lastKeys do
+            if not table.find(keys, oldKey) then
+                local keyLower = string.lower(oldKey)
+                local data = Keybinds.binds[keyLower]
+                if data then
+                    local cmdName = type(data) == "table" and data.cmd or data
+                    if cmdName ~= "clicktp" then
+                        executeKeybind(keyLower, false)
+                    end
+                end
             end
         end
     end
     
+    -- Keybind/command bar key setting
     if Keybinds.settingCommandBarKey and Options.open then
         for _, key in keys do
             if not table.find(Input.lastKeys, key) then
                 local keyLower = string.lower(key)
-                if not isKey(key, "esc", "return", "enter", "mouse", "scroll") then
-                    Settings.commandBarKey = keyLower
-                    notify("Command bar key set to " .. formatKeyName(keyLower))
+                if isKey(key, "esc") then
                     Keybinds.settingCommandBarKey = false
                     Options.needsRedraw = true
-                elseif isKey(key, "esc") then
+                elseif not isKey(key, "return", "enter", "mouse", "scroll", "control", "shift", "alt") then
+                    Settings.commandBarKey = keyLower
+                    notify("Command bar key set to " .. formatKeyName(keyLower))
                     Keybinds.settingCommandBarKey = false
                     Options.needsRedraw = true
                 end
@@ -2960,12 +4006,15 @@ local function updateInput()
         for _, key in keys do
             if not table.find(Input.lastKeys, key) then
                 local keyLower = string.lower(key)
-                if not isKey(key, "esc", "return", "enter", "mouse", "scroll") then
-                    setKeybind(keyLower, Keybinds.settingFor)
-                    notify("Bound " .. Keybinds.settingFor .. " to " .. formatKeyName(keyLower))
+                if isKey(key, "esc") then
+                    if removeKeybind(Keybinds.settingFor) then
+                        notify("Keybind removed for " .. Keybinds.settingFor)
+                    end
                     Keybinds.settingFor = nil
                     Options.needsRedraw = true
-                elseif isKey(key, "esc") then
+                elseif not isKey(key, "return", "enter", "mouse", "scroll", "control", "shift", "alt") then
+                    setKeybind(keyLower, Keybinds.settingFor)
+                    notify("Bound " .. Keybinds.settingFor .. " to " .. formatKeyName(keyLower))
                     Keybinds.settingFor = nil
                     Options.needsRedraw = true
                 end
@@ -2973,118 +4022,117 @@ local function updateInput()
         end
     end
     
+    -- Key hold tracking
     local currentKeySet = {}
     for _, k in keys do currentKeySet[k] = true end
     for key in Input.heldKeys do
         if not currentKeySet[key] then Input.heldKeys[key] = nil end
     end
     
+    -- Character input
     for _, key in keys do
         local char = getCharFromKey(key)
         local isBackspace = isKey(key, "back")
-        
         if char or isBackspace then
+            local shouldType = Bar.open or (Options.searchFocused and Options.tab == "keybinds") or (CommandPanel.open and CommandPanel.searchFocused)
             if Input.heldKeys[key] then
                 local holdData = Input.heldKeys[key]
                 if currentTime - holdData.startTime >= Input.KEY_INITIAL_DELAY then
                     if currentTime - holdData.lastRepeat >= Input.KEY_REPEAT_RATE then
-                        if isBackspace then 
-                            deleteChar()
-                        elseif char and (Bar.open or Options.searchFocused or CommandPanel.searchFocused) then 
-                            addChar(char) 
-                        end
+                        if isBackspace then deleteChar()
+                        elseif char and shouldType then addChar(char) end
                         holdData.lastRepeat = currentTime
                     end
                 end
             else
                 if not table.find(Input.lastKeys, key) then
                     Input.heldKeys[key] = {startTime = currentTime, lastRepeat = currentTime}
-                    if isBackspace then 
-                        deleteChar()
-                    elseif char and (Bar.open or Options.searchFocused or CommandPanel.searchFocused) then 
-                        addChar(char) 
-                    end
+                    if isBackspace then deleteChar()
+                    elseif char and shouldType then addChar(char) end
                 end
             end
         end
     end
     
+    -- Command Panel input
     if CommandPanel.open then
-        if mClick and inRect(mPos, CommandPanelDrawing.closeBounds.pos, CommandPanelDrawing.closeBounds.size) then
-            hideCommandPanel()
-            Input.lastMouse = mDown
-            Input.lastKeys = keys
-            return
+        if mClick and CommandPanelDrawing.closeBounds and CommandPanelDrawing.closeBounds.pos then
+            if inRect(mPos, CommandPanelDrawing.closeBounds.pos, CommandPanelDrawing.closeBounds.size) then
+                hideCommandPanel()
+                Input.lastMouse = mDown
+                Input.lastKeys = keys
+                return
+            end
         end
         
-        if mClick and inRect(mPos, CommandPanelDrawing.headerBounds.pos, CommandPanelDrawing.headerBounds.size) then
-            CommandPanel.dragging = true
-            CommandPanel.dragOffset = Vector2.new(mPos.X - CommandPanel.posX, mPos.Y - CommandPanel.posY)
+        if mClick and CommandPanelDrawing.headerBounds and CommandPanelDrawing.headerBounds.pos then
+            local clickedSearch = CommandPanelDrawing.searchBounds and inRect(mPos, CommandPanelDrawing.searchBounds.pos, CommandPanelDrawing.searchBounds.size)
+            if not clickedSearch and inRect(mPos, CommandPanelDrawing.headerBounds.pos, CommandPanelDrawing.headerBounds.size) then
+                CommandPanel.dragging = true
+                CommandPanel.dragOffset = Vector2.new(mPos.X - CommandPanel.posX, mPos.Y - CommandPanel.posY)
+            end
         end
-        if not mDown then 
-            CommandPanel.dragging = false 
-            CommandPanelDrawing.scrollDragging = false
-        end
+        if not mDown then CommandPanel.dragging = false CommandPanelDrawing.scrollDragging = false end
         if CommandPanel.dragging then
             CommandPanel.posX = mPos.X - CommandPanel.dragOffset.X
             CommandPanel.posY = mPos.Y - CommandPanel.dragOffset.Y
-            createCommandPanelDrawing()
+            CommandPanelDrawing.needsRedraw = true
         end
         
-        if CommandPanelDrawing.scrollBounds and CommandPanelDrawing.scrollBounds.pos then
+        if CommandPanelDrawing.scrollBounds and CommandPanelDrawing.scrollBounds.pos and CommandPanelDrawing.scrollBounds.maxScroll then
             if mClick and inRect(mPos, CommandPanelDrawing.scrollBounds.pos, CommandPanelDrawing.scrollBounds.size) then
                 CommandPanelDrawing.scrollDragging = true
                 CommandPanelDrawing.scrollDragStartY = mPos.Y
                 CommandPanelDrawing.scrollDragStartOff = CommandPanelDrawing.scrollOffset
             end
-        end
-        
-        if CommandPanelDrawing.scrollDragging and CommandPanelDrawing.scrollBounds and CommandPanelDrawing.scrollBounds.maxScroll then
-            local delta = mPos.Y - CommandPanelDrawing.scrollDragStartY
-            local scrollbarH = CommandPanelDrawing.scrollBounds.size.Y
-            local thumbH = CommandPanelDrawing.scrollBounds.thumbH
-            local scrollRange = scrollbarH - thumbH
-            if scrollRange > 0 then
-                local scrollDelta = (delta / scrollRange) * CommandPanelDrawing.scrollBounds.maxScroll
-                CommandPanelDrawing.scrollOffset = math.clamp(CommandPanelDrawing.scrollDragStartOff + scrollDelta, 0, CommandPanelDrawing.scrollBounds.maxScroll)
-                createCommandPanelDrawing()
-            end
-        end
-        
-        if mClick and not CommandPanel.dragging then
-            if inRect(mPos, CommandPanelDrawing.searchBounds.pos, CommandPanelDrawing.searchBounds.size) then
-                CommandPanel.searchFocused = true
-                createCommandPanelDrawing()
-            elseif CommandPanel.searchFocused then
-                CommandPanel.searchFocused = false
-                createCommandPanelDrawing()
-            end
-        end
-        
-        if mClick and not CommandPanel.dragging then
-            for _, cat in CommandPanelDrawing.categoryBounds do
-                if inRect(mPos, cat.pos, cat.size) then
-                    CommandPanel.selectedCategory = cat.name
-                    CommandPanelDrawing.scrollOffset = 0
-                    createCommandPanelDrawing()
-                    break
+            if CommandPanelDrawing.scrollDragging then
+                local delta = mPos.Y - CommandPanelDrawing.scrollDragStartY
+                local scrollbarH = CommandPanelDrawing.scrollBounds.size.Y
+                local thumbH = CommandPanelDrawing.scrollBounds.thumbH
+                local scrollRange = scrollbarH - thumbH
+                if scrollRange > 0 then
+                    local scrollDeltaVal = (delta / scrollRange) * CommandPanelDrawing.scrollBounds.maxScroll
+                    CommandPanelDrawing.scrollOffset = math.clamp(CommandPanelDrawing.scrollDragStartOff + scrollDeltaVal, 0, CommandPanelDrawing.scrollBounds.maxScroll)
+                    CommandPanelDrawing.needsRedraw = true
                 end
             end
         end
         
         if mClick and not CommandPanel.dragging then
-            for _, item in CommandPanelDrawing.itemBounds do
-                if inRect(mPos, item.pos, item.size) then
-                    local cmdName = string.match(item.cmd.name, "^(%S+)")
-                    if cmdName then
-                        runCmd(";" .. cmdName)
+            local clickedSearch = CommandPanelDrawing.searchBounds and inRect(mPos, CommandPanelDrawing.searchBounds.pos, CommandPanelDrawing.searchBounds.size)
+            
+            if clickedSearch then
+                if not CommandPanel.searchFocused then
+                    CommandPanel.searchFocused = true
+                    CommandPanelDrawing.needsRedraw = true
+                end
+            else
+                if CommandPanel.searchFocused then
+                    CommandPanel.searchFocused = false
+                    CommandPanelDrawing.needsRedraw = true
+                end
+                
+                for _, cat in CommandPanelDrawing.categoryBounds do
+                    if inRect(mPos, cat.pos, cat.size) then
+                        CommandPanel.selectedCategory = cat.name
+                        CommandPanelDrawing.scrollOffset = 0
+                        CommandPanelDrawing.needsRedraw = true
+                        break
                     end
-                    break
+                end
+                
+                for _, item in CommandPanelDrawing.itemBounds do
+                    if inRect(mPos, item.pos, item.size) then
+                        local cmdName = string.match(item.cmd.name, "^(%S+)")
+                        if cmdName then runCmd(";" .. cmdName) end
+                        break
+                    end
                 end
             end
         end
     end
     
+    -- Options input
     if Options.open then
         if mClick and inRect(mPos, Options.closeBounds.pos, Options.closeBounds.size) then
             toggleOptions()
@@ -3097,17 +4145,23 @@ local function updateInput()
             Options.dragging = true
             Options.dragOffset = Vector2.new(mPos.X - Options.posX, mPos.Y - Options.posY)
         end
-        if not mDown then 
-            Options.dragging = false 
-            Options.scrollDragging = false
-        end
+        if not mDown then Options.dragging = false Options.scrollDragging = false end
         if Options.dragging then
             Options.posX = mPos.X - Options.dragOffset.X
             Options.posY = mPos.Y - Options.dragOffset.Y
             Options.needsRedraw = true
         end
         
-        -- Options scroll dragging
+        if Options.tab == "keybinds" and mClick and not Options.dragging then
+            if Options.searchBounds and Options.searchBounds.pos then
+                if inRect(mPos, Options.searchBounds.pos, Options.searchBounds.size) then
+                    if not Options.searchFocused then Options.searchFocused = true Options.needsRedraw = true end
+                else
+                    if Options.searchFocused then Options.searchFocused = false Options.needsRedraw = true end
+                end
+            end
+        end
+        
         if Options.tab == "keybinds" and Options.scrollBounds and Options.scrollBounds.pos then
             if mClick and inRect(mPos, Options.scrollBounds.pos, Options.scrollBounds.size) then
                 Options.scrollDragging = true
@@ -3115,7 +4169,6 @@ local function updateInput()
                 Options.scrollDragStartOff = Options.scrollOffset
             end
         end
-        
         if Options.scrollDragging and Options.scrollBounds and Options.scrollBounds.maxScroll then
             local delta = mPos.Y - Options.scrollDragStartY
             local scrollbarH = Options.scrollBounds.size.Y
@@ -3132,16 +4185,16 @@ local function updateInput()
         if mClick and not Options.dragging then
             for tabId, bounds in Options.tabBounds do
                 if inRect(mPos, bounds.pos, bounds.size) then
-                    if tabId == "theme_accent" then
-                        Options.themeTab = "accent"
-                        Options.needsRedraw = true
-                    elseif tabId == "theme_fill" then
-                        Options.themeTab = "fill"
-                        Options.needsRedraw = true
+                    if tabId == "theme_accent" then Options.themeTab = "accent" Options.needsRedraw = true
+                    elseif tabId == "theme_fill" then Options.themeTab = "fill" Options.needsRedraw = true
                     elseif tabId == "keybinds" or tabId == "theme" or tabId == "general" then
                         Options.tab = tabId
                         Options.scrollOffset = 0
                         Options.targetScroll = 0
+                        Options.searchQuery = ""
+                        Options.searchFocused = false
+                        Options.filteredCache = {}
+                        Options.lastSearchQuery = ""
                         Options.needsRedraw = true
                     end
                     break
@@ -3151,12 +4204,17 @@ local function updateInput()
         
         if Options.tab == "keybinds" and mClick and not Options.dragging then
             for _, item in Options.keybindItems do
-                if inRect(mPos, item.bounds.pos, item.bounds.size) then
-                    if Keybinds.settingFor == item.cmd.name then
-                        Keybinds.settingFor = nil
-                    else
-                        Keybinds.settingFor = item.cmd.name
-                    end
+                if inRect(mPos, item.keyBounds.pos, item.keyBounds.size) then
+                    if Keybinds.settingFor == item.cmd.name then Keybinds.settingFor = nil
+                    else Keybinds.settingFor = item.cmd.name end
+                    Options.needsRedraw = true
+                    break
+                end
+                if inRect(mPos, item.modeBounds.pos, item.modeBounds.size) then
+                    local currentMode = getModeForCommand(item.cmd.name)
+                    local newMode = currentMode == "toggle" and "hold" or "toggle"
+                    setModeForCommand(item.cmd.name, newMode)
+                    notify(item.cmd.name .. " mode: " .. string.upper(newMode))
                     Options.needsRedraw = true
                     break
                 end
@@ -3170,7 +4228,7 @@ local function updateInput()
                     Theme.AccentLight = item.preset.light
                     Theme.AccentDark = item.preset.dark
                     notify("Accent: " .. item.preset.name)
-                    Options.needsRedraw = true
+                    applyThemeChange()
                     break
                 end
             end
@@ -3185,7 +4243,7 @@ local function updateInput()
                     Theme.Card = item.preset.card
                     Theme.Border = item.preset.border
                     notify("Background: " .. item.preset.name)
-                    Options.needsRedraw = true
+                    applyThemeChange()
                     break
                 end
             end
@@ -3197,6 +4255,28 @@ local function updateInput()
                     if item.id == "commandBarKey" then
                         Keybinds.settingCommandBarKey = not Keybinds.settingCommandBarKey
                         Options.needsRedraw = true
+                    elseif item.id == "hideUsername" then
+                        Settings.hideUsername = not Settings.hideUsername
+                        notify(Settings.hideUsername and "Username hidden" or "Username visible")
+                        Options.needsRedraw = true
+                        if CommandPanel.open then CommandPanelDrawing.needsRedraw = true end
+                        if ServerInfo.open then ServerInfo.drawn = false end
+                    elseif item.id == "watermark" then
+                        Settings.watermarkEnabled = not Settings.watermarkEnabled
+                        notify(Settings.watermarkEnabled and "Watermark enabled" or "Watermark disabled")
+                        Options.needsRedraw = true
+                    elseif item.id == "statusBar" then
+                        Settings.statusBarEnabled = not Settings.statusBarEnabled
+                        notify(Settings.statusBarEnabled and "Status Bar enabled" or "Status Bar disabled")
+                        Options.needsRedraw = true
+                    elseif string.sub(item.id, 1, 7) == "corner_" then
+                        Settings.statusBarCorner = string.sub(item.id, 8)
+                        notify("Status Bar: " .. Settings.statusBarCorner)
+                        Options.needsRedraw = true
+                    elseif string.sub(item.id, 1, 7) == "orient_" then
+                        Settings.statusBarOrientation = string.sub(item.id, 8)
+                        notify("Layout: " .. Settings.statusBarOrientation)
+                        Options.needsRedraw = true
                     end
                     break
                 end
@@ -3204,28 +4284,24 @@ local function updateInput()
         end
     end
     
+    -- KeybindsGui input
     if KeybindsGui.open then
-        if mClick and inRect(mPos, KeybindsGui.headerBounds.pos, KeybindsGui.headerBounds.size) then
+        if mClick and KeybindsGui.headerBounds and inRect(mPos, KeybindsGui.headerBounds.pos, KeybindsGui.headerBounds.size) then
             KeybindsGui.dragging = true
             KeybindsGui.dragOffset = Vector2.new(mPos.X - KeybindsGui.posX, mPos.Y - KeybindsGui.posY)
         end
-        if not mDown then 
-            KeybindsGui.dragging = false 
-        end
+        if not mDown then KeybindsGui.dragging = false end
         if KeybindsGui.dragging then
             KeybindsGui.posX = mPos.X - KeybindsGui.dragOffset.X
             KeybindsGui.posY = mPos.Y - KeybindsGui.dragOffset.Y
+            KeybindsGui.needsRedraw = true
         end
         if mClick and not KeybindsGui.dragging then
             for _, item in KeybindsGui.itemBounds do
                 if inRect(mPos, item.pos, item.size) then
                     local checkFn = toggleFeatures[item.cmd]
                     if checkFn then
-                        if checkFn() then
-                            runCmd(";un" .. item.cmd)
-                        else
-                            runCmd(";" .. item.cmd)
-                        end
+                        if checkFn() then runCmd(";un" .. item.cmd) else runCmd(";" .. item.cmd) end
                     end
                     break
                 end
@@ -3235,61 +4311,36 @@ local function updateInput()
     
     Input.lastMouse = mDown
     
+    -- Key handling
     for _, key in keys do
         if not table.find(Input.lastKeys, key) then
             if isKey(key, "esc") then
                 if Keybinds.settingFor then
-                    Keybinds.settingFor = nil
-                    Options.needsRedraw = true
                 elseif Keybinds.settingCommandBarKey then
-                    Keybinds.settingCommandBarKey = false
-                    Options.needsRedraw = true
-                elseif CommandPanel.searchFocused then
-                    CommandPanel.searchFocused = false
-                    createCommandPanelDrawing()
-                elseif CommandPanel.open then
-                    hideCommandPanel()
-                elseif Options.searchFocused then 
-                    Options.searchFocused = false 
-                    Options.needsRedraw = true
-                elseif ServerInfo.open then 
-                    toggleServerInfo()
-                elseif Options.open then
-                    toggleOptions()
-                elseif Bar.open then 
-                    hideBar() 
-                end
+                elseif CommandPanel.searchFocused then CommandPanel.searchFocused = false CommandPanelDrawing.needsRedraw = true
+                elseif CommandPanel.open then hideCommandPanel()
+                elseif Options.searchFocused then Options.searchFocused = false Options.needsRedraw = true
+                elseif ServerInfo.open then toggleServerInfo()
+                elseif Bar.open then hideBar() end
             elseif isKey(key, "return", "enter") then
-                if Bar.open then 
-                    runCmd(Bar.input) 
-                    hideBar()
-                elseif Options.searchFocused then 
-                    Options.searchFocused = false 
-                    Options.needsRedraw = true
-                elseif CommandPanel.searchFocused then 
-                    CommandPanel.searchFocused = false 
-                    createCommandPanelDrawing() 
-                end
-            elseif isKey(key, "tab") and Bar.open then
-                applyAC()
+                if Bar.open then runCmd(Bar.input) hideBar()
+                elseif Options.searchFocused then Options.searchFocused = false Options.needsRedraw = true
+                elseif CommandPanel.searchFocused then CommandPanel.searchFocused = false CommandPanelDrawing.needsRedraw = true end
+            elseif isKey(key, "tab") and Bar.open then applyAC()
             elseif isKey(key, "up") then
                 if Bar.open then
                     if Bar.showingPlayerSuggestions and #Bar.playerSuggestions > 0 then
                         Bar.playerSuggestionSelected = Bar.playerSuggestionSelected - 1
-                        if Bar.playerSuggestionSelected < 1 then 
-                            Bar.playerSuggestionSelected = #Bar.playerSuggestions 
-                        end
+                        if Bar.playerSuggestionSelected < 1 then Bar.playerSuggestionSelected = #Bar.playerSuggestions end
                         Bar.needsRedraw = true
                     elseif #Bar.acResults > 0 then
                         Bar.acSelected = Bar.acSelected - 1
-                        if Bar.acSelected < 1 then 
-                            Bar.acSelected = #Bar.acResults 
-                        end
+                        if Bar.acSelected < 1 then Bar.acSelected = #Bar.acResults end
                         Bar.needsRedraw = true
                     end
                 elseif CommandPanel.open then
                     CommandPanelDrawing.scrollOffset = math.max(0, CommandPanelDrawing.scrollOffset - 1)
-                    createCommandPanelDrawing()
+                    CommandPanelDrawing.needsRedraw = true
                 elseif Options.open and Options.tab == "keybinds" then
                     Options.targetScroll = math.max(0, Options.targetScroll - 1)
                 end
@@ -3297,22 +4348,18 @@ local function updateInput()
                 if Bar.open then
                     if Bar.showingPlayerSuggestions and #Bar.playerSuggestions > 0 then
                         Bar.playerSuggestionSelected = Bar.playerSuggestionSelected + 1
-                        if Bar.playerSuggestionSelected > #Bar.playerSuggestions then 
-                            Bar.playerSuggestionSelected = 1 
-                        end
+                        if Bar.playerSuggestionSelected > #Bar.playerSuggestions then Bar.playerSuggestionSelected = 1 end
                         Bar.needsRedraw = true
                     elseif #Bar.acResults > 0 then
                         Bar.acSelected = Bar.acSelected + 1
-                        if Bar.acSelected > #Bar.acResults then 
-                            Bar.acSelected = 1 
-                        end
+                        if Bar.acSelected > #Bar.acResults then Bar.acSelected = 1 end
                         Bar.needsRedraw = true
                     end
                 elseif CommandPanel.open then
                     local filtered = getFilteredPanelCommands()
                     local maxScroll = math.max(0, #filtered - CommandPanelDrawing.maxVisible)
                     CommandPanelDrawing.scrollOffset = math.min(maxScroll, CommandPanelDrawing.scrollOffset + 1)
-                    createCommandPanelDrawing()
+                    CommandPanelDrawing.needsRedraw = true
                 elseif Options.open and Options.tab == "keybinds" then
                     Options.targetScroll = math.min(optionsMaxScroll(), Options.targetScroll + 1)
                 end
@@ -3320,11 +4367,8 @@ local function updateInput()
                 local keyLower = string.lower(key)
                 local cmdKey = Settings.commandBarKey
                 local shouldOpen = false
-                if (cmdKey == "semicolon" or cmdKey == "oem_1") and isKey(key, "semicolon", "oem_1") then 
-                    shouldOpen = true
-                elseif keyLower == cmdKey then 
-                    shouldOpen = true 
-                end
+                if (cmdKey == "semicolon" or cmdKey == "oem_1") and isKey(key, "semicolon", "oem_1") then shouldOpen = true
+                elseif keyLower == cmdKey then shouldOpen = true end
                 if shouldOpen then
                     Bar.open = true
                     Bar.input = ";"
@@ -3345,13 +4389,10 @@ end
 local function updateRender()
     updateIntro()
     
-    if Bar.open then
-        Bar.needsRedraw = true
-        createBar()
-    end
+    if Bar.open then Bar.needsRedraw = true createBar() end
     if Options.open and Options.needsRedraw then createOptions() end
-    if CommandPanel.open then createCommandPanelDrawing() end
-    if KeybindsGui.open then createKeybindsGui() end
+    if CommandPanel.open and CommandPanelDrawing.needsRedraw then createCommandPanelDrawing() end
+    if KeybindsGui.open and KeybindsGui.needsRedraw then createKeybindsGui() end
     if ServerInfo.open then createServerInfo() end
     
     updateStatusBar()
@@ -3370,4 +4411,5 @@ RunService.Render:Connect(function()
     updateLogic(dt)
     updateInput()
     updateRender()
+    updateWatermark(dt)
 end)
