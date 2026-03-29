@@ -1,6 +1,6 @@
 --!optimize 2
 -- ╔══════════════════════════════════════════════════════════════════╗
--- ║                    SEVERE ADMIN PANEL v3.0                       ║
+-- ║                    SEVERE ADMIN PANEL v3.1                       ║
 -- ║                     Press ; to open commands                     ║
 -- ╚══════════════════════════════════════════════════════════════════╝
 
@@ -16,6 +16,7 @@ local tonumber = tonumber
 local pcall = pcall
 local type = type
 local bit32 = bit32
+local vector = vector
 
 -- ============================================
 -- SERVICES
@@ -55,16 +56,12 @@ local Offsets = {
 -- ============================================
 local function magnitude(v)
     if not v then return 0 end
-    local x, y, z = v.X or 0, v.Y or 0, v.Z or 0
-    return math.sqrt(x * x + y * y + z * z)
+    return vector.magnitude(v)
 end
 
 local function distance(v1, v2)
     if not v1 or not v2 then return 0 end
-    local dx = (v1.X or 0) - (v2.X or 0)
-    local dy = (v1.Y or 0) - (v2.Y or 0)
-    local dz = (v1.Z or 0) - (v2.Z or 0)
-    return math.sqrt(dx * dx + dy * dy + dz * dz)
+    return vector.magnitude(v1 - v2)
 end
 
 -- ============================================
@@ -108,6 +105,7 @@ local Settings = {
     statusBarOrientation = "horizontal",
     hideUsername = false,
     watermarkEnabled = true,
+    bypassTpEnabled = false,
 }
 
 -- ============================================
@@ -141,13 +139,103 @@ local Features = {
     thirdPersonHeight = 2,
     instantInteractEnabled = false,
     clickTpEnabled = false,
-    clickTpKeyHeld = false,
 }
+
+-- ============================================
+-- BYPASS TELEPORT SYSTEM (IMPROVED)
+-- ============================================
+local BypassTp = {
+    enabled = false,
+    holdFrames = 15,
+    retryCount = 5,
+}
+
+local function performBypassTeleport(targetPos)
+    local char = LocalPlayer.Character
+    if not char then return false end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    
+    task.spawn(function()
+        local originalAnchored = root.Anchored
+        
+        -- Step 1: Anchor part to prevent physics
+        root.Anchored = true
+        root.Velocity = Vector3.new(0, 0, 0)
+        
+        task.wait()
+        
+        -- Step 2: Teleport while anchored
+        root.CFrame = CFrame.new(targetPos)
+        
+        task.wait()
+        
+        -- Step 3: Unanchor and set state
+        root.Anchored = originalAnchored
+        root.Velocity = Vector3.new(0, 0, 0)
+        
+        if hum then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+        end
+        
+        -- Step 4: Hold position with retries
+        for i = 1, BypassTp.holdFrames do
+            task.wait()
+            if root and root.Parent then
+                local currentDist = distance(root.Position, targetPos)
+                if currentDist > 10 then
+                    -- Got rubberbanded, re-teleport
+                    root.Anchored = true
+                    root.CFrame = CFrame.new(targetPos)
+                    root.Velocity = Vector3.new(0, 0, 0)
+                    task.wait()
+                    root.Anchored = originalAnchored
+                    if hum then
+                        pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+                    end
+                end
+            end
+        end
+        
+        -- Final position lock
+        if root and root.Parent then
+            root.Velocity = Vector3.new(0, 0, 0)
+        end
+    end)
+    
+    return true
+end
+
+local function doTeleport(targetPos, forceBypass)
+    local char = LocalPlayer.Character
+    if not char then return false end
+    
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    
+    if forceBypass or Settings.bypassTpEnabled then
+        return performBypassTeleport(targetPos)
+    else
+        -- Normal teleport
+        root.CFrame = CFrame.new(targetPos)
+        root.Velocity = Vector3.new(0, 0, 0)
+        if hum then
+            pcall(function() hum:ChangeState(Enum.HumanoidStateType.Running) end)
+        end
+        return true
+    end
+end
 
 local Teleport = {
     target = nil,
     frames = 0,
     instantMove = false,
+    useBypass = false,
 }
 
 local DiedTp = {
@@ -164,12 +252,10 @@ local Spawnpoint = {
     enabled = false,
     position = nil,
     cframe = nil,
-    teleportCooldown = 0,
-    hasTeleportedThisRespawn = false,
-    lastCharacterId = nil,
-    lastAliveState = true,
-    respawnDetected = false,
-    respawnFrame = 0,
+    lastHealth = 100,
+    wasDead = false,
+    wasAliveLastFrame = true,
+    cooldown = 0,
 }
 
 local Gravity = {
@@ -204,12 +290,13 @@ local bindableCommands = {
     instantinteract = true,
     clicktp = true,
     fov = true,
+    bypasstp = true,
 }
 
 local toggleFeatures = {}
 
 -- ============================================
--- WATERMARK SYSTEM
+-- WATERMARK SYSTEM (DRAGGABLE)
 -- ============================================
 local Watermark = {
     elements = {},
@@ -217,6 +304,13 @@ local Watermark = {
     opacity = 0,
     targetOpacity = 0,
     fadeSpeed = 2,
+    posX = nil,
+    posY = nil,
+    dragging = false,
+    dragOffset = Vector2.new(0, 0),
+    bounds = {pos = Vector2.new(0, 0), size = Vector2.new(0, 0)},
+    W = 168,
+    H = 38,
 }
 
 local function clearWatermark()
@@ -235,8 +329,17 @@ local function createWatermark()
     local vw = cam.ViewportSize.X
     local els = Watermark.elements
     
-    local baseX = vw - 180
-    local baseY = 15
+    -- Initialize position if not set
+    if Watermark.posX == nil then
+        Watermark.posX = vw - Watermark.W - 20
+        Watermark.posY = 15
+    end
+    
+    local baseX = Watermark.posX
+    local baseY = Watermark.posY
+    
+    -- Update bounds for dragging
+    Watermark.bounds = {pos = Vector2.new(baseX, baseY), size = Vector2.new(Watermark.W, Watermark.H)}
     
     -- Glow effect (multiple layers)
     for i = 3, 1, -1 do
@@ -245,9 +348,9 @@ local function createWatermark()
         glow.Filled = true
         glow.Color = Theme.Accent
         glow.Opacity = 0
-        glow.Rounding = 10 + i * 2
-        glow.Position = Vector2.new(baseX - 8 - i * 3, baseY - 4 - i * 2)
-        glow.Size = Vector2.new(168 + i * 6, 38 + i * 4)
+        glow.Rounding = 8 + i * 2
+        glow.Position = Vector2.new(baseX - i * 3, baseY - i * 2)
+        glow.Size = Vector2.new(Watermark.W + i * 6, Watermark.H + i * 4)
         table.insert(els, {obj = glow, type = "glow", layer = i})
     end
     
@@ -257,9 +360,9 @@ local function createWatermark()
     bg.Filled = true
     bg.Color = Theme.Primary
     bg.Opacity = 0
-    bg.Rounding = 10
-    bg.Position = Vector2.new(baseX - 8, baseY - 4)
-    bg.Size = Vector2.new(168, 38)
+    bg.Rounding = 8
+    bg.Position = Vector2.new(baseX, baseY)
+    bg.Size = Vector2.new(Watermark.W, Watermark.H)
     table.insert(els, {obj = bg, type = "bg"})
     
     -- Border
@@ -268,22 +371,11 @@ local function createWatermark()
     border.Filled = false
     border.Color = Theme.Accent
     border.Opacity = 0
-    border.Rounding = 10
+    border.Rounding = 8
     border.Thickness = 2
-    border.Position = Vector2.new(baseX - 8, baseY - 4)
-    border.Size = Vector2.new(168, 38)
+    border.Position = Vector2.new(baseX, baseY)
+    border.Size = Vector2.new(Watermark.W, Watermark.H)
     table.insert(els, {obj = border, type = "border"})
-    
-    -- Accent line
-    local accentLine = Drawing.new("Square")
-    accentLine.Visible = true
-    accentLine.Filled = true
-    accentLine.Color = Theme.Accent
-    accentLine.Opacity = 0
-    accentLine.Rounding = 10
-    accentLine.Position = Vector2.new(baseX - 8, baseY - 4)
-    accentLine.Size = Vector2.new(4, 38)
-    table.insert(els, {obj = accentLine, type = "accent"})
     
     -- Logo circle
     local logoCircle = Drawing.new("Circle")
@@ -293,7 +385,7 @@ local function createWatermark()
     logoCircle.Opacity = 0
     logoCircle.NumSides = 24
     logoCircle.Thickness = 2
-    logoCircle.Position = Vector2.new(baseX + 12, baseY + 15)
+    logoCircle.Position = Vector2.new(baseX + 20, baseY + Watermark.H / 2)
     logoCircle.Radius = 12
     table.insert(els, {obj = logoCircle, type = "logo"})
     
@@ -306,7 +398,7 @@ local function createWatermark()
     logoLetter.Opacity = 0
     logoLetter.Outline = true
     logoLetter.Center = true
-    logoLetter.Position = Vector2.new(baseX + 12, baseY + 7)
+    logoLetter.Position = Vector2.new(baseX + 20, baseY + Watermark.H / 2 - 8)
     table.insert(els, {obj = logoLetter, type = "text"})
     
     -- Title
@@ -317,18 +409,18 @@ local function createWatermark()
     title.Color = Theme.TextPrimary
     title.Opacity = 0
     title.Outline = true
-    title.Position = Vector2.new(baseX + 32, baseY + 2)
+    title.Position = Vector2.new(baseX + 40, baseY + 2)
     table.insert(els, {obj = title, type = "text"})
     
     -- Version
     local version = Drawing.new("Text")
     version.Visible = true
-    version.Text = "v3.0"
+    version.Text = "v3.1"
     version.Size = 10
     version.Color = Theme.Accent
     version.Opacity = 0
     version.Outline = true
-    version.Position = Vector2.new(baseX + 100, baseY + 5)
+    version.Position = Vector2.new(baseX + 108, baseY + 5)
     table.insert(els, {obj = version, type = "text"})
     
     -- FPS counter
@@ -339,7 +431,7 @@ local function createWatermark()
     fps.Color = Theme.TextSecondary
     fps.Opacity = 0
     fps.Outline = true
-    fps.Position = Vector2.new(baseX + 32, baseY + 18)
+    fps.Position = Vector2.new(baseX + 40, baseY + 18)
     table.insert(els, {obj = fps, type = "fps"})
     
     -- Ping
@@ -350,10 +442,69 @@ local function createWatermark()
     ping.Color = Theme.TextSecondary
     ping.Opacity = 0
     ping.Outline = true
-    ping.Position = Vector2.new(baseX + 85, baseY + 18)
+    ping.Position = Vector2.new(baseX + 93, baseY + 18)
     table.insert(els, {obj = ping, type = "ping"})
     
     Watermark.visible = true
+end
+
+local function updateWatermarkPosition()
+    if #Watermark.elements == 0 then return end
+    
+    local baseX = Watermark.posX
+    local baseY = Watermark.posY
+    
+    Watermark.bounds = {pos = Vector2.new(baseX, baseY), size = Vector2.new(Watermark.W, Watermark.H)}
+    
+    local elementIndex = 1
+    
+    -- Glow layers
+    for i = 3, 1, -1 do
+        local item = Watermark.elements[elementIndex]
+        if item and item.obj then
+            item.obj.Position = Vector2.new(baseX - i * 3, baseY - i * 2)
+        end
+        elementIndex = elementIndex + 1
+    end
+    
+    -- Background
+    local bgItem = Watermark.elements[elementIndex]
+    if bgItem and bgItem.obj then bgItem.obj.Position = Vector2.new(baseX, baseY) end
+    elementIndex = elementIndex + 1
+    
+    -- Border
+    local borderItem = Watermark.elements[elementIndex]
+    if borderItem and borderItem.obj then borderItem.obj.Position = Vector2.new(baseX, baseY) end
+    elementIndex = elementIndex + 1
+    
+    -- Logo circle
+    local logoItem = Watermark.elements[elementIndex]
+    if logoItem and logoItem.obj then logoItem.obj.Position = Vector2.new(baseX + 20, baseY + Watermark.H / 2) end
+    elementIndex = elementIndex + 1
+    
+    -- Logo letter
+    local letterItem = Watermark.elements[elementIndex]
+    if letterItem and letterItem.obj then letterItem.obj.Position = Vector2.new(baseX + 20, baseY + Watermark.H / 2 - 8) end
+    elementIndex = elementIndex + 1
+    
+    -- Title
+    local titleItem = Watermark.elements[elementIndex]
+    if titleItem and titleItem.obj then titleItem.obj.Position = Vector2.new(baseX + 40, baseY + 2) end
+    elementIndex = elementIndex + 1
+    
+    -- Version
+    local versionItem = Watermark.elements[elementIndex]
+    if versionItem and versionItem.obj then versionItem.obj.Position = Vector2.new(baseX + 108, baseY + 5) end
+    elementIndex = elementIndex + 1
+    
+    -- FPS
+    local fpsItem = Watermark.elements[elementIndex]
+    if fpsItem and fpsItem.obj then fpsItem.obj.Position = Vector2.new(baseX + 40, baseY + 18) end
+    elementIndex = elementIndex + 1
+    
+    -- Ping
+    local pingItem = Watermark.elements[elementIndex]
+    if pingItem and pingItem.obj then pingItem.obj.Position = Vector2.new(baseX + 93, baseY + 18) end
 end
 
 local function updateWatermark(dt)
@@ -386,7 +537,7 @@ local function updateWatermark(dt)
             el.Opacity = Watermark.opacity * 0.08 / item.layer
         elseif item.type == "bg" then
             el.Opacity = Watermark.opacity * 0.95
-        elseif item.type == "border" or item.type == "accent" or item.type == "logo" then
+        elseif item.type == "border" or item.type == "logo" then
             el.Opacity = Watermark.opacity
         elseif item.type == "text" then
             el.Opacity = Watermark.opacity
@@ -406,7 +557,7 @@ local function updateWatermark(dt)
 end
 
 -- ============================================
--- CLICKTP SYSTEM (Improved with terrain detection)
+-- CLICKTP SYSTEM (FIXED - Toggle/Hold via Keybind)
 -- ============================================
 local ClickTP = {
     VERTICAL_OFFSET = 3,
@@ -421,8 +572,6 @@ local ClickTP = {
     OBBCount = 0,
     CharacterRoots = {},
     LastCacheTime = 0,
-    WasClicked = false,
-    BoundKey = nil,
 }
 
 local function IsCharacterDescendant(instance)
@@ -455,7 +604,6 @@ local function RefreshClickTPCache()
     for _, inst in workspace:GetDescendants() do
         if not validClasses[inst.ClassName] or inst.Parent == nil or IsCharacterDescendant(inst) then continue end
         
-        -- Skip non-collidable parts for terrain detection
         if inst.Transparency >= 1 then continue end
         
         local part = inst
@@ -556,7 +704,6 @@ local function FindGroundBelow(x, y, z)
     
     for i = 1, count do
         local e = cache[i]
-        -- Check if point is within XZ bounds of this part
         local dx = x - e.PX
         local dz = z - e.PZ
         local localX = dx * e.RX + dz * e.RZ
@@ -617,14 +764,12 @@ local function PerformClickTPRaycast()
     local hitY = oy + rdy * best
     local hitZ = oz + rdz * best
     
-    -- Try to find ground surface for better placement
     local groundY = FindGroundBelow(hitX, hitY + 10, hitZ)
     local finalY
     
     if groundY > -math.huge and groundY > hitY - 5 then
         finalY = groundY + ClickTP.VERTICAL_OFFSET
     else
-        -- Use the hit point but try to place on top of the surface
         if bestEntry then
             finalY = bestEntry.TopY + ClickTP.VERTICAL_OFFSET
         else
@@ -635,11 +780,13 @@ local function PerformClickTPRaycast()
     return Vector3.new(hitX, finalY, hitZ)
 end
 
+-- Get bound key for clicktp
 local function getClickTPBoundKey()
-    for key, data in Keybinds.binds do
+    for key, data in pairs(Keybinds.binds) do
         local cmd = type(data) == "table" and data.cmd or data
         if cmd == "clicktp" then
-            return key, (type(data) == "table" and data.mode) or Keybinds.modes["clicktp"] or "toggle"
+            local mode = (type(data) == "table" and data.mode) or Keybinds.modes["clicktp"] or "toggle"
+            return key, mode
         end
     end
     return nil, "toggle"
@@ -754,7 +901,6 @@ local Input = {
     KEY_INITIAL_DELAY = 0.4,
     KEY_REPEAT_RATE = 0.033,
     lastScrollTime = 0,
-    ctrlHeld = false,
 }
 
 local ProximityPromptCache = {
@@ -834,7 +980,7 @@ local Categories = {
 local playerArgCommands = {tp = true, view = true, userid = true}
 
 -- ============================================
--- COMMANDS FOR PANEL
+-- COMMANDS FOR PANEL (UPDATED - clicktp info fixed)
 -- ============================================
 local commandsForPanel = {
     {name = "noclip", desc = "Walk through walls", cat = "MOVEMENT"},
@@ -854,8 +1000,10 @@ local commandsForPanel = {
     {name = "unspawnpoint", desc = "Clear respawn position", cat = "TELEPORT"},
     {name = "diedtp", desc = "Auto return to death location", cat = "TELEPORT"},
     {name = "undiedtp", desc = "Disable death return", cat = "TELEPORT"},
-    {name = "clicktp", desc = "Click to teleport (use bound key)", cat = "TELEPORT"},
+    {name = "clicktp", desc = "Click to teleport (activate via keybinds in Options)", cat = "TELEPORT"},
     {name = "unclicktp", desc = "Disable click teleport", cat = "TELEPORT"},
+    {name = "bypasstp", desc = "Enable anti-cheat bypass for TP", cat = "TELEPORT"},
+    {name = "unbypasstp", desc = "Disable TP bypass", cat = "TELEPORT"},
     {name = "gravity [num]", desc = "Set world gravity", cat = "FUN"},
     {name = "ungravity", desc = "Reset gravity to default", cat = "FUN"},
     {name = "antivoid", desc = "Teleport to spawn when falling", cat = "ETC"},
@@ -1005,7 +1153,7 @@ local function parseCommandForPlayerArg(input)
 end
 
 local function getKeybindForCommand(cmdName)
-    for key, data in Keybinds.binds do
+    for key, data in pairs(Keybinds.binds) do
         if type(data) == "table" and data.cmd == cmdName then 
             return key, data.mode or Keybinds.modes[cmdName] or "toggle"
         elseif type(data) == "string" and data == cmdName then
@@ -1021,7 +1169,7 @@ end
 
 local function setModeForCommand(cmdName, mode)
     Keybinds.modes[cmdName] = mode
-    for key, data in Keybinds.binds do
+    for key, data in pairs(Keybinds.binds) do
         local cmd = type(data) == "table" and data.cmd or data
         if cmd == cmdName then
             Keybinds.binds[key] = {cmd = cmdName, mode = mode}
@@ -1033,7 +1181,7 @@ end
 
 local function setKeybind(key, cmdName)
     local mode = Keybinds.modes[cmdName] or "toggle"
-    for k, data in Keybinds.binds do
+    for k, data in pairs(Keybinds.binds) do
         local cmd = type(data) == "table" and data.cmd or data
         if cmd == cmdName then 
             Keybinds.binds[k] = nil 
@@ -1044,7 +1192,7 @@ local function setKeybind(key, cmdName)
 end
 
 local function removeKeybind(cmdName)
-    for key, data in Keybinds.binds do
+    for key, data in pairs(Keybinds.binds) do
         local cmd = type(data) == "table" and data.cmd or data
         if cmd == cmdName then 
             Keybinds.binds[key] = nil 
@@ -1085,9 +1233,13 @@ local function getActiveFeatures()
         table.insert(features, {name = "DiedTP", cmd = "diedtp", key = key, mode = mode, color = Theme.Teleport})
     end
     if Features.clickTpEnabled then
-        local key, mode = getKeybindForCommand("clicktp")
-        local modeText = mode == "hold" and " (Hold)" or ""
+        local key, mode = getClickTPBoundKey()
+        local modeText = mode == "hold" and " [Hold]" or ""
         table.insert(features, {name = "ClickTP" .. modeText, cmd = "clicktp", key = key, mode = mode, color = Theme.Teleport})
+    end
+    if Settings.bypassTpEnabled then
+        local key, mode = getKeybindForCommand("bypasstp")
+        table.insert(features, {name = "Bypass TP", cmd = "bypasstp", key = key, mode = mode, color = Theme.Teleport})
     end
     if Features.antiVoidEnabled then
         local key, mode = getKeybindForCommand("antivoid")
@@ -1184,7 +1336,7 @@ local function createIntro()
         
         local sub = Drawing.new("Text")
         sub.Visible = true
-        sub.Text = "Admin Panel v3.0"
+        sub.Text = "Admin Panel v3.1"
         sub.Size = 13
         sub.Color = Theme.TextSecondary
         sub.Outline = true
@@ -1240,6 +1392,7 @@ end)
 -- ============================================
 -- FEATURE FUNCTIONS
 -- ============================================
+
 local function tpToPlayer(name)
     local char = LocalPlayer.Character
     if not char then notify("No character") return end
@@ -1249,25 +1402,23 @@ local function tpToPlayer(name)
     if not tChar then notify("Target has no character") return end
     local root = tChar:FindFirstChild("HumanoidRootPart")
     if not root then return end
-    Teleport.target = root.Position + Vector3.new(0, 3, 0)
-    Teleport.frames = 3
-    Teleport.instantMove = true
+    
+    local targetPos = root.Position + Vector3.new(0, 3, 0)
+    doTeleport(targetPos, false)
     notify("Teleporting to " .. target.Name)
 end
 
 local function gotoPos(x, y, z)
-    Teleport.target = Vector3.new(x, y, z)
-    Teleport.frames = 3
-    Teleport.instantMove = true
+    local targetPos = Vector3.new(x, y, z)
+    doTeleport(targetPos, false)
     notify("Teleporting to " .. x .. ", " .. y .. ", " .. z)
 end
 
 local function goToSpawn()
     local char = LocalPlayer.Character
     if not char then notify("No character") return end
-    Teleport.target = getSpawnLocation()
-    Teleport.frames = 3
-    Teleport.instantMove = true
+    local targetPos = getSpawnLocation()
+    doTeleport(targetPos, false)
     notify("Teleporting to spawn")
 end
 
@@ -1422,8 +1573,7 @@ local function updateAntiVoid()
         local root = char:FindFirstChild("HumanoidRootPart")
         if not root then return end
         if root.Position.Y < Features.voidThreshold then
-            root.CFrame = CFrame.new(getSpawnLocation())
-            root.Velocity = Vector3.new(0, 0, 0)
+            doTeleport(getSpawnLocation(), true)
             Features.antiVoidCooldown = 2
             notify("Anti-void: Teleported to spawn!")
         end
@@ -1523,8 +1673,7 @@ local function updateDiedTp(dt)
         end
         
         if DiedTp.wasDead and isAliveNow and DiedTp.deathPos then
-            root.CFrame = CFrame.new(DiedTp.deathPos + Vector3.new(0, 3, 0))
-            root.Velocity = Vector3.new(0, 0, 0)
+            doTeleport(DiedTp.deathPos + Vector3.new(0, 3, 0), true)
             notify("But it refused.")
             DiedTp.wasDead = false
             DiedTp.deathPos = nil
@@ -1536,30 +1685,28 @@ local function updateDiedTp(dt)
     end)
 end
 
-local function getCharacterId(char)
-    if not char then return nil end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if root and root:IsA("BasePart") then
-        return tostring(root) .. char.Name
-    end
-    return nil
-end
-
+-- ============================================
+-- SPAWNPOINT (Same logic as DiedTP)
+-- ============================================
 local function setSpawnpoint()
     local char = LocalPlayer.Character
     if not char then notify("No character") return end
     local root = char:FindFirstChild("HumanoidRootPart")
     if not root or not root:IsA("BasePart") then notify("No HumanoidRootPart") return end
     
-    Spawnpoint.cframe = root.CFrame
     Spawnpoint.position = root.Position + Vector3.new(0, 0.5, 0)
+    Spawnpoint.cframe = root.CFrame
     Spawnpoint.enabled = true
-    Spawnpoint.teleportCooldown = 0
-    Spawnpoint.hasTeleportedThisRespawn = false
-    Spawnpoint.lastCharacterId = getCharacterId(char)
-    Spawnpoint.lastAliveState = true
-    Spawnpoint.respawnDetected = false
-    Spawnpoint.respawnFrame = 0
+    Spawnpoint.wasDead = false
+    Spawnpoint.wasAliveLastFrame = true
+    Spawnpoint.cooldown = 0
+    
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        Spawnpoint.lastHealth = hum.Health
+    else
+        Spawnpoint.lastHealth = 100
+    end
     
     KeybindsGui.needsRedraw = true
     notify("Spawnpoint set!")
@@ -1569,72 +1716,52 @@ local function clearSpawnpoint()
     Spawnpoint.enabled = false
     Spawnpoint.position = nil
     Spawnpoint.cframe = nil
-    Spawnpoint.lastCharacterId = nil
-    Spawnpoint.hasTeleportedThisRespawn = false
-    Spawnpoint.respawnDetected = false
+    Spawnpoint.wasDead = false
     KeybindsGui.needsRedraw = true
     notify("Spawnpoint cleared")
 end
 
-local function checkSpawnpoint()
+local function updateSpawnpoint(dt)
     if not Spawnpoint.enabled or not Spawnpoint.position then return end
+    if Spawnpoint.cooldown > 0 then Spawnpoint.cooldown = Spawnpoint.cooldown - dt return end
     
-    if Spawnpoint.teleportCooldown > 0 then
-        Spawnpoint.teleportCooldown = Spawnpoint.teleportCooldown - 0.016
-        return
-    end
-    
-    local char = LocalPlayer.Character
-    if not char then 
-        Spawnpoint.lastAliveState = false 
-        return 
-    end
-    
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root or not root:IsA("BasePart") then 
-        Spawnpoint.lastAliveState = false 
-        return 
-    end
-    
-    local hum = char:FindFirstChildOfClass("Humanoid")
-    local isAlive = hum and hum.Health > 0
-    
-    local currentCharId = getCharacterId(char)
-    
-    local isNewCharacter = currentCharId ~= Spawnpoint.lastCharacterId and Spawnpoint.lastCharacterId ~= nil
-    local justRespawned = not Spawnpoint.lastAliveState and isAlive
-    
-    if isNewCharacter or justRespawned then
-        Spawnpoint.respawnDetected = true
-        Spawnpoint.respawnFrame = 0
-        Spawnpoint.hasTeleportedThisRespawn = false
-    end
-    
-    if Spawnpoint.respawnDetected and not Spawnpoint.hasTeleportedThisRespawn then
-        Spawnpoint.respawnFrame = Spawnpoint.respawnFrame + 1
-        
-        if Spawnpoint.respawnFrame == 20 then
-            local success = pcall(function()
-                root.CFrame = CFrame.new(Spawnpoint.position)
-                root.Velocity = Vector3.new(0, 0, 0)
-            end)
-            
-            if success then
-                notify("Respawn → Spawnpoint")
-                Spawnpoint.hasTeleportedThisRespawn = true
-                Spawnpoint.teleportCooldown = 2
-                Spawnpoint.respawnDetected = false
-            end
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then 
+            Spawnpoint.wasDead = true 
+            Spawnpoint.wasAliveLastFrame = false
+            return 
         end
         
-        if Spawnpoint.respawnFrame > 60 then
-            Spawnpoint.respawnDetected = false
-            Spawnpoint.hasTeleportedThisRespawn = true
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root or not root:IsA("BasePart") then 
+            Spawnpoint.wasDead = true 
+            Spawnpoint.wasAliveLastFrame = false
+            return 
         end
-    end
-    
-    Spawnpoint.lastCharacterId = currentCharId
-    Spawnpoint.lastAliveState = isAlive
+        
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum then return end
+        
+        local currentHealth = hum.Health
+        local isAliveNow = currentHealth > 0
+        
+        -- Detect death
+        if Spawnpoint.wasAliveLastFrame and not isAliveNow then
+            Spawnpoint.wasDead = true
+        end
+        
+        -- Detect respawn and teleport
+        if Spawnpoint.wasDead and isAliveNow then
+            doTeleport(Spawnpoint.position, true)
+            notify("Respawn → Spawnpoint")
+            Spawnpoint.wasDead = false
+            Spawnpoint.cooldown = 2
+        end
+        
+        Spawnpoint.lastHealth = currentHealth
+        Spawnpoint.wasAliveLastFrame = isAliveNow
+    end)
 end
 
 local function initWorldPtr()
@@ -1721,51 +1848,63 @@ local function getUserId(name)
     notify(player.Name .. "'s UserId: " .. userId .. " (copied)")
 end
 
+-- ============================================
+-- CLICKTP (Keybind-based activation)
+-- ============================================
 local function clickTpOn()
     if Features.clickTpEnabled then return end
     Features.clickTpEnabled = true
-    Features.clickTpKeyHeld = false
+    RefreshClickTPCache()
     KeybindsGui.needsRedraw = true
+    
     local key, mode = getClickTPBoundKey()
     if key then
-        notify("ClickTP enabled - " .. (mode == "hold" and "Hold " or "Press ") .. formatKeyName(key) .. " + Click")
+        if mode == "hold" then
+            notify("ClickTP enabled - Hold " .. formatKeyName(key) .. " to activate, then click")
+        else
+            notify("ClickTP enabled - Click anywhere to teleport, " .. formatKeyName(key) .. " to disable")
+        end
     else
-        notify("ClickTP enabled - Bind a key in Options")
+        notify("ClickTP enabled - Bind a key in Options to use")
     end
 end
 
 local function clickTpOff()
     Features.clickTpEnabled = false
-    Features.clickTpKeyHeld = false
     KeybindsGui.needsRedraw = true
     notify("ClickTP disabled")
 end
 
 local function performClickTP()
-    if not Features.clickTpEnabled then return end
+    if not Features.clickTpEnabled then return false end
     
     local targetPos = PerformClickTPRaycast()
     if targetPos then
-        local char = LocalPlayer.Character
-        if char then
-            local root = char:FindFirstChild("HumanoidRootPart")
-            if root and root:IsA("BasePart") then
-                -- Instant teleport without stun
-                root.CFrame = CFrame.new(targetPos)
-                root.Velocity = Vector3.new(0, 0, 0)
-                
-                -- Reset any physics state
-                pcall(function()
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    if hum then
-                        hum:ChangeState(Enum.HumanoidStateType.Running)
-                    end
-                end)
-            end
-        end
+        doTeleport(targetPos, true)
+        return true
     end
+    return false
 end
 
+-- ============================================
+-- BYPASS TP TOGGLE
+-- ============================================
+local function bypassTpOn()
+    if Settings.bypassTpEnabled then return end
+    Settings.bypassTpEnabled = true
+    KeybindsGui.needsRedraw = true
+    notify("Bypass TP enabled - all teleports use anti-cheat bypass")
+end
+
+local function bypassTpOff()
+    Settings.bypassTpEnabled = false
+    KeybindsGui.needsRedraw = true
+    notify("Bypass TP disabled")
+end
+
+-- ============================================
+-- INSTANT INTERACT
+-- ============================================
 local function scanProximityPrompts()
     ProximityPromptCache.prompts = {}
     pcall(function()
@@ -1811,6 +1950,7 @@ local function updateInstantInteract()
     end)
 end
 
+-- Forward declarations
 local toggleCommandPanel
 local toggleOptions
 local showKeybindsGui
@@ -1818,6 +1958,9 @@ local hideKeybindsGui
 local toggleServerInfo
 local runCmd
 
+-- ============================================
+-- COMMANDS (clicktp not executable via command)
+-- ============================================
 local commands = {
     {name = "noclip", desc = "Walk through walls", usage = ";noclip", cat = "Movement", fn = function() noclipOn() end},
     {name = "unnoclip", desc = "Disable noclip", usage = ";unnoclip", cat = "Movement", fn = function() noclipOff() end},
@@ -1836,8 +1979,11 @@ local commands = {
     {name = "unspawnpoint", desc = "Clear respawn position", usage = ";unspawnpoint", cat = "Teleport", fn = function() clearSpawnpoint() end},
     {name = "diedtp", desc = "Auto return to death location", usage = ";diedtp", cat = "Teleport", fn = function() diedTpOn() end},
     {name = "undiedtp", desc = "Disable death return", usage = ";undiedtp", cat = "Teleport", fn = function() diedTpOff() end},
-    {name = "clicktp", desc = "Click to teleport", usage = ";clicktp", cat = "Teleport", fn = function() clickTpOn() end},
+    -- clicktp handled via keybinds only, but we keep commands for toggle feature tracking
+    {name = "clicktp", desc = "Click to teleport (use keybind)", usage = ";clicktp", cat = "Teleport", fn = function() clickTpOn() end},
     {name = "unclicktp", desc = "Disable click teleport", usage = ";unclicktp", cat = "Teleport", fn = function() clickTpOff() end},
+    {name = "bypasstp", desc = "Enable anti-cheat TP bypass", usage = ";bypasstp", cat = "Teleport", fn = function() bypassTpOn() end},
+    {name = "unbypasstp", desc = "Disable TP bypass", usage = ";unbypasstp", cat = "Teleport", fn = function() bypassTpOff() end},
     {name = "antivoid", desc = "Teleport to spawn when falling", usage = ";antivoid", cat = "Utility", fn = function() antiVoidOn() end},
     {name = "unantivoid", desc = "Disable anti-void", usage = ";unantivoid", cat = "Utility", fn = function() antiVoidOff() end},
     {name = "forcereset", desc = "Force kill (bypass reset locks)", usage = ";forcereset", cat = "Utility", fn = function() forceReset() end},
@@ -1864,6 +2010,7 @@ toggleFeatures = {
     instantinteract = function() return Features.instantInteractEnabled end,
     clicktp = function() return Features.clickTpEnabled end,
     fov = function() return Features.fovEnabled end,
+    bypasstp = function() return Settings.bypassTpEnabled end,
 }
 
 runCmd = function(input)
@@ -1887,10 +2034,36 @@ local function executeKeybind(key, isPressed)
     local cmdName = type(data) == "table" and data.cmd or data
     local mode = Keybinds.modes[cmdName] or "toggle"
     
-    -- Special handling for clicktp - it doesn't toggle on/off with keybind
-    -- The keybind is used to activate the click action
+    -- ClickTP special handling: 
+    -- Hold mode = holding key activates clicktp temporarily
+    -- Toggle mode = pressing key toggles clicktp on/off
     if cmdName == "clicktp" then
-        return -- ClickTP handled separately in updateInput
+        if mode == "hold" then
+            if isPressed then
+                if not Features.clickTpEnabled then
+                    Features.clickTpEnabled = true
+                    RefreshClickTPCache()
+                    KeybindsGui.needsRedraw = true
+                end
+                Keybinds.activeHolds["clicktp"] = true
+            else
+                if Keybinds.activeHolds["clicktp"] then
+                    Features.clickTpEnabled = false
+                    KeybindsGui.needsRedraw = true
+                    Keybinds.activeHolds["clicktp"] = nil
+                end
+            end
+        else
+            -- Toggle mode
+            if isPressed then
+                if Features.clickTpEnabled then
+                    clickTpOff()
+                else
+                    clickTpOn()
+                end
+            end
+        end
+        return
     end
     
     local checkFn = toggleFeatures[cmdName]
@@ -1980,7 +2153,7 @@ local function clearCommandPanelDrawing()
 end
 
 -- ============================================
--- COMMAND PANEL (FIXED SEARCH BAR INTERACTION)
+-- COMMAND PANEL
 -- ============================================
 local function getFilteredPanelCommands()
     local filtered = {}
@@ -2144,15 +2317,7 @@ local function createCommandPanelDrawing()
     searchBorder.Size = Vector2.new(searchW, searchH)
     table.insert(els, searchBorder)
     
-    -- Store search bounds with explicit values
-    CommandPanelDrawing.searchBounds = {
-        pos = Vector2.new(searchX, searchY), 
-        size = Vector2.new(searchW, searchH),
-        x = searchX,
-        y = searchY,
-        w = searchW,
-        h = searchH
-    }
+    CommandPanelDrawing.searchBounds = {pos = Vector2.new(searchX, searchY), size = Vector2.new(searchW, searchH)}
     
     local searchIcon = Drawing.new("Text")
     searchIcon.Visible = true
@@ -2400,11 +2565,11 @@ local function createCommandPanelDrawing()
     
     local hint = Drawing.new("Text")
     hint.Visible = true
-    hint.Text = "Click X to close • Drag header to move"
+    hint.Text = "Click X to close"
     hint.Size = 10
     hint.Color = Theme.TextMuted
     hint.Outline = true
-    hint.Position = Vector2.new(px + W - 230, footerY + 12)
+    hint.Position = Vector2.new(px + W - 110, footerY + 12)
     table.insert(els, hint)
     
     CommandPanelDrawing.needsRedraw = false
@@ -2679,7 +2844,7 @@ local function createBar()
     Bar.needsRedraw = false
 end
 -- ============================================
--- OPTIONS PANEL (WITH HIDE USERNAME AND WATERMARK)
+-- OPTIONS PANEL
 -- ============================================
 local function createOptions()
     clearOptions()
@@ -3198,6 +3363,9 @@ local function createOptions()
         local settingY = contentStartY
         local settingH = 60
         local settingGap = 10
+        local toggleW = 50
+        local toggleH = 26
+        local toggleX = px + Options.W - Options.PAD - toggleW - 15
         
         -- Command bar key setting
         local keySettingBg = Drawing.new("Square")
@@ -3283,9 +3451,6 @@ local function createOptions()
         hideUserDesc.Position = Vector2.new(px + Options.PAD + 15, settingY + 32)
         table.insert(els, hideUserDesc)
         
-        local toggleW = 50
-        local toggleH = 26
-        local toggleX = px + Options.W - Options.PAD - toggleW - 15
         local toggleY = settingY + 17
         
         local hideUserToggleBg = Drawing.new("Square")
@@ -3548,15 +3713,6 @@ local function createOptions()
     fLine.Position = Vector2.new(px + Options.PAD, fY - 8)
     fLine.Size = Vector2.new(Options.W - Options.PAD * 2, 1)
     table.insert(els, fLine)
-    
-    local fHint = Drawing.new("Text")
-    fHint.Visible = true
-    fHint.Text = "Drag header to move • Click X to close"
-    fHint.Size = 10
-    fHint.Color = Theme.TextMuted
-    fHint.Outline = true
-    fHint.Position = Vector2.new(px + Options.W - 220, fY)
-    table.insert(els, fHint)
     
     Options.needsRedraw = false
 end
@@ -3946,42 +4102,6 @@ local function deleteChar()
     return false
 end
 
-local function pasteFromClipboard()
-    local clipboard = nil
-    pcall(function()
-        if getclipboard then
-            clipboard = getclipboard()
-        end
-    end)
-    
-    if clipboard and type(clipboard) == "string" and #clipboard > 0 then
-        clipboard = string.gsub(clipboard, "[\r\n]", "")
-        clipboard = string.sub(clipboard, 1, 200)
-        
-        if CommandPanel.searchFocused and CommandPanel.open then
-            CommandPanel.searchQuery = CommandPanel.searchQuery .. clipboard
-            CommandPanelDrawing.scrollOffset = 0
-            CommandPanelDrawing.needsRedraw = true
-            return true
-        elseif Bar.open then
-            Bar.input = Bar.input .. clipboard
-            Bar.acSelected = 0
-            Bar.playerSuggestionSelected = 0
-            Bar.needsRedraw = true
-            return true
-        elseif Options.searchFocused and Options.tab == "keybinds" then
-            Options.searchQuery = Options.searchQuery .. clipboard
-            Options.targetScroll = 0
-            Options.scrollOffset = 0
-            Options.filteredCache = {}
-            Options.lastSearchQuery = ""
-            Options.needsRedraw = true
-            return true
-        end
-    end
-    return false
-end
-
 local function applyAC()
     if Bar.showingPlayerSuggestions and #Bar.playerSuggestions > 0 then
         local suggestion = Bar.playerSuggestions[Bar.playerSuggestionSelected] or Bar.playerSuggestions[1]
@@ -4006,7 +4126,7 @@ local function applyAC()
 end
 
 local function updateLogic(dt)
-    checkSpawnpoint()
+    updateSpawnpoint(dt)
     updateDiedTp(dt)
     updateNoclip()
     updateInfJump()
@@ -4021,36 +4141,6 @@ local function updateLogic(dt)
         if now - ClickTP.LastCacheTime >= ClickTP.CACHE_REFRESH_INTERVAL then
             ClickTP.LastCacheTime = now
             RefreshClickTPCache()
-        end
-    end
-    
-    -- Legacy teleport system (for tp, goto, spawn commands)
-    if Teleport.frames > 0 and Teleport.target then
-        pcall(function()
-            local char = LocalPlayer.Character
-            if char then
-                local root = char:FindFirstChild("HumanoidRootPart")
-                if not root then root = char.PrimaryPart end
-                if root and root:IsA("BasePart") then
-                    root.CFrame = CFrame.new(Teleport.target)
-                    root.Velocity = Vector3.new(0, 0, 0)
-                    
-                    -- Prevent stun by resetting humanoid state
-                    if Teleport.instantMove then
-                        local hum = char:FindFirstChildOfClass("Humanoid")
-                        if hum then
-                            pcall(function()
-                                hum:ChangeState(Enum.HumanoidStateType.Running)
-                            end)
-                        end
-                    end
-                end
-            end
-        end)
-        Teleport.frames = Teleport.frames - 1
-        if Teleport.frames == 0 then 
-            Teleport.target = nil 
-            Teleport.instantMove = false
         end
     end
     
@@ -4107,13 +4197,10 @@ local function updateInput()
     local mClick = mDown and not Input.lastMouse
     local currentTime = os_clock()
     
-    -- Track Ctrl key
-    Input.ctrlHeld = false
-    for _, key in keys do
-        if isKey(key, "leftcontrol", "rightcontrol", "control") then
-            Input.ctrlHeld = true
-            break
-        end
+    -- Build current keys set
+    local currentKeysSet = {}
+    for _, k in keys do
+        currentKeysSet[string.lower(k)] = true
     end
     
     -- Scroll
@@ -4126,52 +4213,45 @@ local function updateInput()
     end
     if scrollDelta ~= 0 then handleScroll(scrollDelta) end
     
-    -- ClickTP handling with bound key
-    if Features.clickTpEnabled and not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
-        local boundKey, mode = getClickTPBoundKey()
-        
-        if boundKey then
-            local keyHeld = false
-            for _, key in keys do
-                if string.lower(key) == boundKey then
-                    keyHeld = true
-                    break
-                end
-            end
-            
-            if mode == "toggle" then
-                -- Toggle mode: just click while key was pressed this frame
-                local keyJustPressed = false
-                for _, key in keys do
-                    if string.lower(key) == boundKey and not table.find(Input.lastKeys, key) then
-                        keyJustPressed = true
-                        break
-                    end
-                end
-                
-                if keyHeld and mClick then
-                    performClickTP()
-                end
-            else
-                -- Hold mode: must hold key while clicking
-                if keyHeld and mClick then
-                    performClickTP()
-                end
+    -- ============================================
+    -- WATERMARK DRAGGING
+    -- ============================================
+    if Settings.watermarkEnabled and #Watermark.elements > 0 then
+        if mClick and inRect(mPos, Watermark.bounds.pos, Watermark.bounds.size) then
+            Watermark.dragging = true
+            Watermark.dragOffset = Vector2.new(mPos.X - Watermark.posX, mPos.Y - Watermark.posY)
+        end
+        if not mDown then
+            Watermark.dragging = false
+        end
+        if Watermark.dragging then
+            local cam = workspace.CurrentCamera
+            if cam then
+                Watermark.posX = math.clamp(mPos.X - Watermark.dragOffset.X, 0, cam.ViewportSize.X - Watermark.W)
+                Watermark.posY = math.clamp(mPos.Y - Watermark.dragOffset.Y, 0, cam.ViewportSize.Y - Watermark.H)
+                updateWatermarkPosition()
             end
         end
     end
     
-    -- Keybinds execution (except clicktp which is handled above)
+    -- ============================================
+    -- CLICKTP HANDLING (Fixed logic)
+    -- ============================================
+    if Features.clickTpEnabled and not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
+        -- When ClickTP is enabled and not in any menu, clicking teleports
+        if mClick and not Watermark.dragging then
+            performClickTP()
+        end
+    end
+    
+    -- Keybinds execution
     if not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
         for _, key in keys do
             if not table.find(Input.lastKeys, key) then
                 local keyLower = string.lower(key)
                 local data = Keybinds.binds[keyLower]
                 if data then
-                    local cmdName = type(data) == "table" and data.cmd or data
-                    if cmdName ~= "clicktp" then
-                        executeKeybind(keyLower, true)
-                    end
+                    executeKeybind(keyLower, true)
                 end
             end
         end
@@ -4181,10 +4261,7 @@ local function updateInput()
                 local keyLower = string.lower(oldKey)
                 local data = Keybinds.binds[keyLower]
                 if data then
-                    local cmdName = type(data) == "table" and data.cmd or data
-                    if cmdName ~= "clicktp" then
-                        executeKeybind(keyLower, false)
-                    end
+                    executeKeybind(keyLower, false)
                 end
             end
         end
@@ -4229,42 +4306,40 @@ local function updateInput()
         end
     end
     
-    -- Key hold tracking
-    local currentKeySet = {}
-    for _, k in keys do currentKeySet[k] = true end
-    for key in Input.heldKeys do
-        if not currentKeySet[key] then Input.heldKeys[key] = nil end
-    end
-    
-    -- Ctrl+V paste
-    for _, key in keys do
-        if not table.find(Input.lastKeys, key) then
-            if Input.ctrlHeld and isKey(key, "v") then
-                pasteFromClipboard()
-            end
+    -- Key hold tracking for repeat (restored)
+    for key in pairs(Input.heldKeys) do
+        if not currentKeysSet[string.lower(key)] then 
+            Input.heldKeys[key] = nil 
         end
     end
     
-    -- Character input
+    -- Character input with key repeat
     for _, key in keys do
         local char = getCharFromKey(key)
         local isBackspace = isKey(key, "back")
         if char or isBackspace then
             local shouldType = Bar.open or (Options.searchFocused and Options.tab == "keybinds") or (CommandPanel.open and CommandPanel.searchFocused)
+            
             if Input.heldKeys[key] then
                 local holdData = Input.heldKeys[key]
                 if currentTime - holdData.startTime >= Input.KEY_INITIAL_DELAY then
                     if currentTime - holdData.lastRepeat >= Input.KEY_REPEAT_RATE then
-                        if isBackspace then deleteChar()
-                        elseif char and shouldType and not Input.ctrlHeld then addChar(char) end
+                        if isBackspace then 
+                            deleteChar()
+                        elseif char and shouldType then 
+                            addChar(char) 
+                        end
                         holdData.lastRepeat = currentTime
                     end
                 end
             else
                 if not table.find(Input.lastKeys, key) then
                     Input.heldKeys[key] = {startTime = currentTime, lastRepeat = currentTime}
-                    if isBackspace then deleteChar()
-                    elseif char and shouldType and not Input.ctrlHeld then addChar(char) end
+                    if isBackspace then 
+                        deleteChar()
+                    elseif char and shouldType then 
+                        addChar(char) 
+                    end
                 end
             end
         end
@@ -4283,7 +4358,6 @@ local function updateInput()
         
         if mClick and CommandPanelDrawing.headerBounds and CommandPanelDrawing.headerBounds.pos then
             if inRect(mPos, CommandPanelDrawing.headerBounds.pos, CommandPanelDrawing.headerBounds.size) then
-                -- Check if NOT clicking on search bar
                 local clickedSearch = false
                 if CommandPanelDrawing.searchBounds and CommandPanelDrawing.searchBounds.pos then
                     if inRect(mPos, CommandPanelDrawing.searchBounds.pos, CommandPanelDrawing.searchBounds.size) then
@@ -4326,7 +4400,7 @@ local function updateInput()
             end
         end
         
-        -- Search bar click - FIXED
+        -- Search bar click
         if mClick and not CommandPanel.dragging then
             local clickedSearch = false
             
@@ -4348,7 +4422,6 @@ local function updateInput()
                     CommandPanelDrawing.needsRedraw = true
                 end
                 
-                -- Category clicks
                 for _, cat in CommandPanelDrawing.categoryBounds do
                     if inRect(mPos, cat.pos, cat.size) then
                         CommandPanel.selectedCategory = cat.name
@@ -4358,11 +4431,14 @@ local function updateInput()
                     end
                 end
                 
-                -- Item clicks
                 for _, item in CommandPanelDrawing.itemBounds do
                     if inRect(mPos, item.pos, item.size) then
                         local cmdName = string.match(item.cmd.name, "^(%S+)")
-                        if cmdName then runCmd(";" .. cmdName) end
+                        if cmdName and cmdName ~= "clicktp" then 
+                            runCmd(";" .. cmdName) 
+                        elseif cmdName == "clicktp" then
+                            notify("ClickTP: Bind a key in Options → Keybinds")
+                        end
                         break
                     end
                 end
@@ -4393,7 +4469,6 @@ local function updateInput()
             Options.needsRedraw = true
         end
         
-        -- Search bar click in keybinds tab
         if Options.tab == "keybinds" and mClick and not Options.dragging then
             if Options.searchBounds and Options.searchBounds.pos then
                 if inRect(mPos, Options.searchBounds.pos, Options.searchBounds.size) then
@@ -4410,7 +4485,6 @@ local function updateInput()
             end
         end
         
-        -- Scrollbar
         if Options.tab == "keybinds" and Options.scrollBounds and Options.scrollBounds.pos then
             if mClick and inRect(mPos, Options.scrollBounds.pos, Options.scrollBounds.size) then
                 Options.scrollDragging = true
@@ -4431,9 +4505,8 @@ local function updateInput()
             end
         end
         
-        -- Tab clicks
         if mClick and not Options.dragging then
-            for tabId, bounds in Options.tabBounds do
+            for tabId, bounds in pairs(Options.tabBounds) do
                 if inRect(mPos, bounds.pos, bounds.size) then
                     if tabId == "theme_accent" then Options.themeTab = "accent" Options.needsRedraw = true
                     elseif tabId == "theme_fill" then Options.themeTab = "fill" Options.needsRedraw = true
@@ -4452,7 +4525,6 @@ local function updateInput()
             end
         end
         
-        -- Keybind items
         if Options.tab == "keybinds" and mClick and not Options.dragging then
             for _, item in Options.keybindItems do
                 if inRect(mPos, item.keyBounds.pos, item.keyBounds.size) then
@@ -4475,7 +4547,6 @@ local function updateInput()
             end
         end
         
-        -- Theme items
         if Options.tab == "theme" and Options.themeTab == "accent" and mClick and not Options.dragging then
             for _, item in Options.themeItems do
                 if inRect(mPos, item.bounds.pos, item.bounds.size) then
@@ -4504,7 +4575,6 @@ local function updateInput()
             end
         end
         
-        -- General items
         if Options.tab == "general" and mClick and not Options.dragging then
             for _, item in Options.generalItems do
                 if inRect(mPos, item.bounds.pos, item.bounds.size) then
