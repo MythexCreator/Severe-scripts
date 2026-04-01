@@ -1,9 +1,10 @@
 -- ============================================
--- SEVERE ADMIN PANEL v3.4 (ALL FIXES)
+-- SEVERE ADMIN PANEL v3.5 (ALL FIXES + NEW FEATURES)
 -- ============================================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
 local LocalPlayer = Players.LocalPlayer
 
 local os_clock = os.clock
@@ -33,10 +34,11 @@ local Offsets = {
     MaxHealth = 0x1B4,
     FOV = 0x160,
     ProximityPromptHoldDuration = 0x140,
+    ClockTime = 0x1B8,
 }
 
 -- ============================================
--- SETTINGS (NAPRAWIONE - dodano autoSaveEnabled)
+-- SETTINGS
 -- ============================================
 local Settings = {
     commandBarKey = "semicolon",
@@ -74,7 +76,6 @@ local Theme = {
     Fun = Color3.fromRGB(255, 100, 150),
 }
 
--- MEGA ROZSZERZONE presety Accent (70+ kolorów)
 local accentPresets = {
     {name = "Purple", accent = Color3.fromRGB(138, 43, 226), light = Color3.fromRGB(180, 100, 255), dark = Color3.fromRGB(90, 20, 150)},
     {name = "Violet", accent = Color3.fromRGB(148, 87, 235), light = Color3.fromRGB(180, 130, 255), dark = Color3.fromRGB(100, 50, 180)},
@@ -154,7 +155,6 @@ local accentPresets = {
     {name = "Synthwave", accent = Color3.fromRGB(255, 0, 150), light = Color3.fromRGB(255, 80, 190), dark = Color3.fromRGB(200, 0, 110)},
 }
 
--- MEGA ROZSZERZONE presety Background (40+ kolorów)
 local fillPresets = {
     {name = "Dark", primary = Color3.fromRGB(18, 18, 24), secondary = Color3.fromRGB(25, 25, 35), tertiary = Color3.fromRGB(35, 35, 50), card = Color3.fromRGB(30, 30, 42), border = Color3.fromRGB(60, 60, 80)},
     {name = "Darker", primary = Color3.fromRGB(12, 12, 16), secondary = Color3.fromRGB(18, 18, 24), tertiary = Color3.fromRGB(28, 28, 38), card = Color3.fromRGB(22, 22, 30), border = Color3.fromRGB(50, 50, 65)},
@@ -209,6 +209,7 @@ local State = {
     introElements = {},
     introPhase = 0,
     settingsLoaded = false,
+    sessionStartTime = nil,
 }
 
 local Features = {
@@ -230,6 +231,11 @@ local Features = {
     specTimer = 0,
     clickTpEnabled = false,
     instantInteractEnabled = false,
+    headlessEnabled = false,
+    korbloxEnabled = false,
+    spinbotEnabled = false,
+    spinbotSpeed = 10,
+    spinbotAngle = 0,
 }
 
 local DiedTp = {
@@ -271,8 +277,13 @@ local ProximityPromptCache = {
     scanInterval = 5,
 }
 
+local OriginalParts = {
+    headTransparency = nil,
+    rightLegMesh = nil,
+}
+
 -- ============================================
--- UI STATE (NAPRAWIONE - dodano brakujące pola)
+-- UI STATE
 -- ============================================
 local Bar = {
     open = false,
@@ -317,6 +328,9 @@ local Options = {
     scrollDragging = false,
     scrollDragStartY = 0,
     scrollDragStartOffset = 0,
+    themeScrollDragging = false,
+    themeScrollDragStartY = 0,
+    themeScrollDragStartOffset = 0,
     dragging = false,
     dragOffset = Vector2.new(0, 0),
     needsRedraw = true,
@@ -390,7 +404,7 @@ local Watermark = {
     bounds = nil,
     dragging = false,
     dragOffset = Vector2.new(0, 0),
-    time = 0,
+    sessionTime = 0,
     fps = 0,
     fpsCounter = 0,
     fpsTimer = 0,
@@ -429,6 +443,7 @@ local Categories = {
 local bindableCommands = {
     noclip = true, infjump = true, antivoid = true, diedtp = true, spawnpoint = true,
     keybinds = true, thirdperson = true, instantinteract = true, clicktp = true, fov = true,
+    headless = true, korblox = true, spinbot = true,
 }
 
 local toggleFeatures = {}
@@ -473,6 +488,13 @@ local function formatKeyName(key)
     if k == "rightalt" then return "RALT" end
     if k == "backquote" then return "`" end
     return string.upper(k)
+end
+
+local function formatSessionTime(seconds)
+    local hours = math_floor(seconds / 3600)
+    local minutes = math_floor((seconds % 3600) / 60)
+    local secs = math_floor(seconds % 60)
+    return string.format("%02d:%02d:%02d", hours, minutes, secs)
 end
 
 local function findPlayer(name)
@@ -596,6 +618,9 @@ local function getActiveFeatures()
     if Features.specPlayer then table_insert(active, {name = "Viewing: " .. Features.specPlayer.Name, cmd = "view", color = Theme.Visual}) end
     if Features.clickTpEnabled then table_insert(active, {name = "ClickTP", cmd = "clicktp", color = Theme.Teleport}) end
     if Features.instantInteractEnabled then table_insert(active, {name = "Instant Interact", cmd = "instantinteract", color = Theme.Utility}) end
+    if Features.headlessEnabled then table_insert(active, {name = "Headless", cmd = "headless", color = Theme.Fun}) end
+    if Features.korbloxEnabled then table_insert(active, {name = "Korblox", cmd = "korblox", color = Theme.Fun}) end
+    if Features.spinbotEnabled then table_insert(active, {name = "Spinbot: " .. Features.spinbotSpeed, cmd = "spinbot", color = Theme.Fun}) end
     return active
 end
 
@@ -624,7 +649,7 @@ local function doTeleport(targetPos, instant)
 end
 
 -- ============================================
--- CLICKTP (CAŁKOWICIE PRZEPISANY)
+-- CLICKTP (NAPRAWIONY KIERUNEK)
 -- ============================================
 local function RefreshClickTPCache()
     ClickTP.CachedParts = {}
@@ -661,7 +686,7 @@ local function PerformClickTPRaycast()
     
     local localDirX = normalizedX * tanHalfFov * aspectRatio
     local localDirY = normalizedY * tanHalfFov
-    local localDirZ = -1
+    local localDirZ = 1
     
     local length = math.sqrt(localDirX * localDirX + localDirY * localDirY + localDirZ * localDirZ)
     localDirX = localDirX / length
@@ -670,7 +695,7 @@ local function PerformClickTPRaycast()
     
     local rightVec = camCFrame.RightVector
     local upVec = camCFrame.UpVector
-    local lookVec = -camCFrame.LookVector
+    local lookVec = camCFrame.LookVector
     
     local worldDir = Vector3.new(
         rightVec.X * localDirX + upVec.X * localDirY + lookVec.X * localDirZ,
@@ -690,48 +715,50 @@ local function PerformClickTPRaycast()
             local success, result = pcall(function()
                 if char and part:IsDescendantOf(char) then return nil end
                 
-                local partPos = part.Position
+                local partCF = part.CFrame
+                local partPos = partCF.Position
                 local partSize = part.Size
                 local halfSize = partSize / 2
+                
+                local invCF = partCF:Inverse()
+                local localOrigin = invCF:PointToObjectSpace(camPos)
+                local localDir = invCF:VectorToObjectSpace(worldDir)
                 
                 local epsilon = 0.0001
                 local tMin = 0
                 local tMax = closestDist
                 
-                -- X axis
-                if math.abs(worldDir.X) > epsilon then
-                    local t1 = (partPos.X - halfSize.X - camPos.X) / worldDir.X
-                    local t2 = (partPos.X + halfSize.X - camPos.X) / worldDir.X
+                if math.abs(localDir.X) > epsilon then
+                    local t1 = (-halfSize.X - localOrigin.X) / localDir.X
+                    local t2 = (halfSize.X - localOrigin.X) / localDir.X
                     if t1 > t2 then t1, t2 = t2, t1 end
                     tMin = math.max(tMin, t1)
                     tMax = math.min(tMax, t2)
-                elseif camPos.X < partPos.X - halfSize.X or camPos.X > partPos.X + halfSize.X then
+                elseif localOrigin.X < -halfSize.X or localOrigin.X > halfSize.X then
                     return nil
                 end
                 
                 if tMin > tMax then return nil end
                 
-                -- Y axis
-                if math.abs(worldDir.Y) > epsilon then
-                    local t1 = (partPos.Y - halfSize.Y - camPos.Y) / worldDir.Y
-                    local t2 = (partPos.Y + halfSize.Y - camPos.Y) / worldDir.Y
+                if math.abs(localDir.Y) > epsilon then
+                    local t1 = (-halfSize.Y - localOrigin.Y) / localDir.Y
+                    local t2 = (halfSize.Y - localOrigin.Y) / localDir.Y
                     if t1 > t2 then t1, t2 = t2, t1 end
                     tMin = math.max(tMin, t1)
                     tMax = math.min(tMax, t2)
-                elseif camPos.Y < partPos.Y - halfSize.Y or camPos.Y > partPos.Y + halfSize.Y then
+                elseif localOrigin.Y < -halfSize.Y or localOrigin.Y > halfSize.Y then
                     return nil
                 end
                 
                 if tMin > tMax then return nil end
                 
-                -- Z axis
-                if math.abs(worldDir.Z) > epsilon then
-                    local t1 = (partPos.Z - halfSize.Z - camPos.Z) / worldDir.Z
-                    local t2 = (partPos.Z + halfSize.Z - camPos.Z) / worldDir.Z
+                if math.abs(localDir.Z) > epsilon then
+                    local t1 = (-halfSize.Z - localOrigin.Z) / localDir.Z
+                    local t2 = (halfSize.Z - localOrigin.Z) / localDir.Z
                     if t1 > t2 then t1, t2 = t2, t1 end
                     tMin = math.max(tMin, t1)
                     tMax = math.min(tMax, t2)
-                elseif camPos.Z < partPos.Z - halfSize.Z or camPos.Z > partPos.Z + halfSize.Z then
+                elseif localOrigin.Z < -halfSize.Z or localOrigin.Z > halfSize.Z then
                     return nil
                 end
                 
@@ -739,9 +766,10 @@ local function PerformClickTPRaycast()
                 
                 local hitDist = tMin > 0 and tMin or tMax
                 if hitDist > 0 and hitDist < closestDist then
+                    local hitPoint = camPos + worldDir * hitDist
                     return {
                         dist = hitDist,
-                        pos = Vector3.new(partPos.X, partPos.Y + halfSize.Y + 3, partPos.Z)
+                        pos = Vector3.new(hitPoint.X, partPos.Y + halfSize.Y + 3, hitPoint.Z)
                     }
                 end
                 
@@ -758,30 +786,13 @@ local function PerformClickTPRaycast()
     if not closestHit then
         local fallbackDist = 50
         local targetPos = camPos + worldDir * fallbackDist
-        for _, part in ClickTP.CachedParts do
-            if part and part.Parent then
-                pcall(function()
-                    local partPos = part.Position
-                    local partSize = part.Size
-                    local halfSize = partSize / 2
-                    
-                    if math.abs(targetPos.X - partPos.X) <= halfSize.X + 5 and
-                       math.abs(targetPos.Z - partPos.Z) <= halfSize.Z + 5 and
-                       targetPos.Y > partPos.Y then
-                        local groundY = partPos.Y + halfSize.Y + 3
-                        if not closestHit or groundY > closestHit.Y - 10 then
-                            closestHit = Vector3.new(targetPos.X, groundY, targetPos.Z)
-                        end
-                    end
-                end)
-            end
-        end
+        closestHit = Vector3.new(targetPos.X, targetPos.Y, targetPos.Z)
     end
     
     return closestHit
 end
 -- ============================================
--- WATERMARK (NAPRAWIONY - czeka na załadowanie settings)
+-- WATERMARK (NAPRAWIONY - SESSION TIME)
 -- ============================================
 local function clearWatermark()
     for _, el in Watermark.elements do pcall(function() el:Remove() end) end
@@ -887,7 +898,7 @@ local function createWatermark()
     
     local timeText = Drawing.new("Text")
     timeText.Visible = true
-    timeText.Text = os.date("%H:%M:%S")
+    timeText.Text = formatSessionTime(Watermark.sessionTime)
     timeText.Size = 10
     timeText.Color = Theme.TextMuted
     timeText.Outline = true
@@ -940,6 +951,10 @@ local function updateWatermark(dt)
         return
     end
     
+    if State.sessionStartTime then
+        Watermark.sessionTime = os_clock() - State.sessionStartTime
+    end
+    
     Watermark.fpsCounter = Watermark.fpsCounter + 1
     Watermark.fpsTimer = Watermark.fpsTimer + dt
     if Watermark.fpsTimer >= 1 then
@@ -953,16 +968,12 @@ local function updateWatermark(dt)
         return
     end
     
-    Watermark.time = Watermark.time + dt
-    if Watermark.time >= 0.5 then
-        Watermark.time = 0
-        pcall(function()
-            if #Watermark.elements >= 9 then
-                Watermark.elements[8].Text = tostring(Watermark.fps) .. " FPS"
-                Watermark.elements[9].Text = os.date("%H:%M:%S")
-            end
-        end)
-    end
+    pcall(function()
+        if #Watermark.elements >= 9 then
+            Watermark.elements[8].Text = tostring(Watermark.fps) .. " FPS"
+            Watermark.elements[9].Text = formatSessionTime(Watermark.sessionTime)
+        end
+    end)
 end
 
 -- ============================================
@@ -979,6 +990,7 @@ local commandsForPanel = {
     {name = "unfov", desc = "Reset FOV to default", cat = "Visual", usage = ";unfov"},
     {name = "thirdperson", desc = "Force third person view", cat = "Visual", usage = ";thirdperson"},
     {name = "unthirdperson", desc = "Disable third person", cat = "Visual", usage = ";unthirdperson"},
+    {name = "time", desc = "Set time of day (day/night)", cat = "Visual", usage = ";time [day/night]"},
     {name = "tp", desc = "Teleport to player", cat = "Teleport", usage = ";tp [name]"},
     {name = "goto", desc = "Teleport to coords", cat = "Teleport", usage = ";goto [x] [y] [z]"},
     {name = "spawn", desc = "Go to game spawn", cat = "Teleport", usage = ";spawn"},
@@ -1001,10 +1013,16 @@ local commandsForPanel = {
     {name = "unkeybinds", desc = "Hide active features panel", cat = "Utility", usage = ";unkeybinds"},
     {name = "gravity", desc = "Set world gravity", cat = "Fun", usage = ";gravity [num]"},
     {name = "ungravity", desc = "Reset gravity to default", cat = "Fun", usage = ";ungravity"},
+    {name = "headless", desc = "Make your head invisible", cat = "Fun", usage = ";headless"},
+    {name = "unheadless", desc = "Restore head visibility", cat = "Fun", usage = ";unheadless"},
+    {name = "korblox", desc = "Apply Korblox leg", cat = "Fun", usage = ";korblox"},
+    {name = "unkorblox", desc = "Remove Korblox leg", cat = "Fun", usage = ";unkorblox"},
+    {name = "spinbot", desc = "Spin your character", cat = "Fun", usage = ";spinbot [speed]"},
+    {name = "unspinbot", desc = "Stop spinning", cat = "Fun", usage = ";unspinbot"},
 }
 
 -- ============================================
--- SETTINGS SAVE/LOAD (NAPRAWIONE)
+-- SETTINGS SAVE/LOAD (NAPRAWIONY AUTO-SAVE)
 -- ============================================
 local function color3ToTable(c)
     if not c then return nil end
@@ -1017,10 +1035,8 @@ local function tableToColor3(t)
 end
 
 local function saveSettings()
-    if not Settings.autoSaveEnabled then return end
-    
     local data = {
-        version = "3.4",
+        version = "3.5",
         settings = {
             commandBarKey = Settings.commandBarKey,
             scrollSpeed = Settings.scrollSpeed,
@@ -1096,7 +1112,7 @@ local function loadSettings()
         if data.settings.autoSaveEnabled ~= nil then Settings.autoSaveEnabled = data.settings.autoSaveEnabled end
     end
     
-    if data.theme then
+    if Settings.autoSaveEnabled and data.theme then
         local t = data.theme
         local loadedColor
         loadedColor = tableToColor3(t.accent)
@@ -1254,7 +1270,7 @@ local function createIntro()
         
         local version = Drawing.new("Text")
         version.Visible = true
-        version.Text = "v3.4"
+        version.Text = "v3.5"
         version.Size = 10
         version.Color = Theme.TextMuted
         version.Outline = true
@@ -1304,6 +1320,7 @@ local function updateIntro()
         end
         State.introElements = {}
         State.introComplete = true
+        State.sessionStartTime = os_clock()
         notify("Severe Admin loaded! Press " .. formatKeyName(Settings.commandBarKey))
         return
     end
@@ -1565,6 +1582,244 @@ local function checkSpec()
     if not Features.specPlayer.Parent then specOff() return end
     local char = Features.specPlayer.Character
     if not char or not char:FindFirstChildOfClass("Humanoid") then specOff() end
+end
+
+local function setTimeOfDay(timeArg)
+    if not timeArg then
+        notify("Usage: ;time [day/night]")
+        return
+    end
+    
+    local timeStr = string_lower(timeArg)
+    local clockTime = 14
+    
+    if timeStr == "day" then
+        clockTime = 14
+    elseif timeStr == "night" then
+        clockTime = 0
+    else
+        notify("Invalid time. Use: day or night")
+        return
+    end
+    
+    pcall(function()
+        memory.writef32(Lighting, Offsets.ClockTime, clockTime)
+    end)
+    
+    notify("Time set to " .. timeStr)
+end
+
+local function headlessOn()
+    if Features.headlessEnabled then return end
+    
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then notify("No character") return end
+        
+        local head = char:FindFirstChild("Head")
+        if not head then notify("No head found") return end
+        
+        OriginalParts.headTransparency = head.Transparency
+        head.Transparency = 1
+        
+        for _, child in head:GetChildren() do
+            if child:IsA("Decal") or child:IsA("Texture") then
+                child.Transparency = 1
+            end
+        end
+        
+        for _, acc in char:GetChildren() do
+            if acc:IsA("Accessory") then
+                local handle = acc:FindFirstChild("Handle")
+                if handle then
+                    local attachment = handle:FindFirstChildOfClass("Attachment")
+                    if attachment and string_find(string_lower(attachment.Name), "hat") then
+                        handle.Transparency = 1
+                    end
+                end
+            end
+        end
+    end)
+    
+    Features.headlessEnabled = true
+    KeybindsGui.needsRedraw = true
+    notify("Headless enabled")
+end
+
+local function headlessOff()
+    if not Features.headlessEnabled then return end
+    
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local head = char:FindFirstChild("Head")
+        if head then
+            head.Transparency = OriginalParts.headTransparency or 0
+            
+            for _, child in head:GetChildren() do
+                if child:IsA("Decal") or child:IsA("Texture") then
+                    child.Transparency = 0
+                end
+            end
+        end
+        
+        for _, acc in char:GetChildren() do
+            if acc:IsA("Accessory") then
+                local handle = acc:FindFirstChild("Handle")
+                if handle then
+                    handle.Transparency = 0
+                end
+            end
+        end
+    end)
+    
+    Features.headlessEnabled = false
+    KeybindsGui.needsRedraw = true
+    notify("Headless disabled")
+end
+
+local KORBLOX_MESH_ID = "rbxassetid://4834756851"
+
+local function applyKorblox(char)
+    if not char then return end
+    
+    pcall(function()
+        local rightLowerLeg = char:FindFirstChild("RightLowerLeg")
+        local rightFoot = char:FindFirstChild("RightFoot")
+        
+        if rightLowerLeg and rightLowerLeg:IsA("MeshPart") then
+            if not OriginalParts.rightLegMesh then
+                OriginalParts.rightLegMesh = rightLowerLeg.MeshId
+            end
+            rightLowerLeg.MeshId = KORBLOX_MESH_ID
+            rightLowerLeg.TextureId = ""
+            rightLowerLeg.Color = Color3.fromRGB(100, 100, 100)
+        end
+        
+        if rightFoot then
+            rightFoot.Transparency = 1
+        end
+        
+        local rightLeg = char:FindFirstChild("Right Leg")
+        if rightLeg and rightLeg:IsA("BasePart") then
+            local specialMesh = rightLeg:FindFirstChildOfClass("SpecialMesh")
+            if not specialMesh then
+                specialMesh = Instance.new("SpecialMesh")
+                specialMesh.MeshType = Enum.MeshType.FileMesh
+                specialMesh.Parent = rightLeg
+            end
+            specialMesh.MeshId = KORBLOX_MESH_ID
+            specialMesh.TextureId = ""
+            rightLeg.Color = Color3.fromRGB(100, 100, 100)
+        end
+    end)
+end
+
+local function korbloxOn()
+    if Features.korbloxEnabled then return end
+    
+    local char = LocalPlayer.Character
+    if not char then notify("No character") return end
+    
+    applyKorblox(char)
+    
+    Features.korbloxEnabled = true
+    KeybindsGui.needsRedraw = true
+    notify("Korblox enabled")
+end
+
+local function korbloxOff()
+    if not Features.korbloxEnabled then return end
+    
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local rightLowerLeg = char:FindFirstChild("RightLowerLeg")
+        local rightFoot = char:FindFirstChild("RightFoot")
+        
+        if rightLowerLeg and rightLowerLeg:IsA("MeshPart") and OriginalParts.rightLegMesh then
+            rightLowerLeg.MeshId = OriginalParts.rightLegMesh
+        end
+        
+        if rightFoot then
+            rightFoot.Transparency = 0
+        end
+        
+        local rightLeg = char:FindFirstChild("Right Leg")
+        if rightLeg then
+            local specialMesh = rightLeg:FindFirstChildOfClass("SpecialMesh")
+            if specialMesh then
+                specialMesh:Destroy()
+            end
+        end
+    end)
+    
+    Features.korbloxEnabled = false
+    KeybindsGui.needsRedraw = true
+    notify("Korblox disabled")
+end
+
+pcall(function()
+    LocalPlayer.CharacterAdded:Connect(function(char)
+        task.wait(0.5)
+        if Features.korbloxEnabled then
+            applyKorblox(char)
+        end
+        if Features.headlessEnabled then
+            pcall(function()
+                local head = char:FindFirstChild("Head")
+                if head then
+                    head.Transparency = 1
+                    for _, child in head:GetChildren() do
+                        if child:IsA("Decal") or child:IsA("Texture") then
+                            child.Transparency = 1
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+end)
+
+local function spinbotOn(speed)
+    local speedNum = tonumber(speed) or 10
+    speedNum = math_clamp(speedNum, 1, 100)
+    
+    Features.spinbotSpeed = speedNum
+    Features.spinbotAngle = 0
+    Features.spinbotEnabled = true
+    KeybindsGui.needsRedraw = true
+    notify("Spinbot enabled (speed: " .. speedNum .. ")")
+end
+
+local function spinbotOff()
+    Features.spinbotEnabled = false
+    KeybindsGui.needsRedraw = true
+    notify("Spinbot disabled")
+end
+
+local function updateSpinbot(dt)
+    if not Features.spinbotEnabled then return end
+    
+    pcall(function()
+        local char = LocalPlayer.Character
+        if not char then return end
+        
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if not root then return end
+        
+        local rotationSpeed = Features.spinbotSpeed * 0.5
+        Features.spinbotAngle = Features.spinbotAngle + (rotationSpeed * dt)
+        
+        if Features.spinbotAngle > 6.28318 then
+            Features.spinbotAngle = Features.spinbotAngle - 6.28318
+        end
+        
+        local position = root.CFrame.Position
+        root.CFrame = CFrame.new(position) * CFrame.Angles(0, Features.spinbotAngle, 0)
+    end)
 end
 
 local function diedTpOn()
@@ -1895,14 +2150,12 @@ local function updateInstantInteract()
     end)
 end
 
--- Forward declarations
 local toggleCommandPanel
 local toggleOptions
 local showKeybindsGui
 local hideKeybindsGui
 local toggleServerInfo
 local runCmd
-
 -- ============================================
 -- COMMANDS
 -- ============================================
@@ -1917,6 +2170,7 @@ local commands = {
     {name = "unfov", desc = "Reset FOV to default", usage = ";unfov", cat = "Visual", fn = function() resetFov() end},
     {name = "thirdperson", desc = "Force third person view", usage = ";thirdperson", cat = "Visual", fn = function() thirdPersonOn() end},
     {name = "unthirdperson", desc = "Disable third person", usage = ";unthirdperson", cat = "Visual", fn = function() thirdPersonOff() end},
+    {name = "time", desc = "Set time (day/night)", usage = ";time [day/night]", cat = "Visual", fn = function(a) setTimeOfDay(a[1]) end},
     {name = "tp", desc = "Teleport to player", usage = ";tp [name]", cat = "Teleport", args = "player", fn = function(a) if a[1] then tpToPlayer(a[1]) end end},
     {name = "goto", desc = "Teleport to coords", usage = ";goto [x] [y] [z]", cat = "Teleport", fn = function(a) gotoPos(tonumber(a[1]) or 0, tonumber(a[2]) or 100, tonumber(a[3]) or 0) end},
     {name = "spawn", desc = "Go to game spawn", usage = ";spawn", cat = "Teleport", fn = function() goToSpawn() end},
@@ -1939,6 +2193,12 @@ local commands = {
     {name = "unkeybinds", desc = "Hide active features panel", usage = ";unkeybinds", cat = "Utility", fn = function() hideKeybindsGui() end},
     {name = "gravity", desc = "Set world gravity", usage = ";gravity [num]", cat = "Fun", fn = function(a) if a[1] then setGravity(a[1]) else notify("Usage: ;gravity [number]") end end},
     {name = "ungravity", desc = "Reset gravity to default", usage = ";ungravity", cat = "Fun", fn = function() resetGravity() end},
+    {name = "headless", desc = "Make head invisible", usage = ";headless", cat = "Fun", fn = function() headlessOn() end},
+    {name = "unheadless", desc = "Restore head", usage = ";unheadless", cat = "Fun", fn = function() headlessOff() end},
+    {name = "korblox", desc = "Apply Korblox leg", usage = ";korblox", cat = "Fun", fn = function() korbloxOn() end},
+    {name = "unkorblox", desc = "Remove Korblox", usage = ";unkorblox", cat = "Fun", fn = function() korbloxOff() end},
+    {name = "spinbot", desc = "Spin character", usage = ";spinbot [speed]", cat = "Fun", fn = function(a) spinbotOn(a[1]) end},
+    {name = "unspinbot", desc = "Stop spinning", usage = ";unspinbot", cat = "Fun", fn = function() spinbotOff() end},
 }
 
 toggleFeatures = {
@@ -1952,6 +2212,9 @@ toggleFeatures = {
     instantinteract = function() return Features.instantInteractEnabled end,
     clicktp = function() return Features.clickTpEnabled end,
     fov = function() return Features.fovEnabled end,
+    headless = function() return Features.headlessEnabled end,
+    korblox = function() return Features.korbloxEnabled end,
+    spinbot = function() return Features.spinbotEnabled end,
 }
 
 runCmd = function(input)
@@ -2103,8 +2366,9 @@ local function hideBar()
     Bar.showingPlayerSuggestions = false
     Input.heldKeys = {}
 end
+
 -- ============================================
--- COMMAND PANEL (NAPRAWIONY SCROLL)
+-- COMMAND PANEL
 -- ============================================
 local function getFilteredPanelCommands()
     local filtered = {}
@@ -2567,6 +2831,7 @@ toggleOptions = function()
         Options.scrollDragging = false
         Options.themeScroll = 0
         Options.themeTargetScroll = 0
+        Options.themeScrollDragging = false
         Options.lastSearchQuery = ""
         Options.filteredCache = {}
         Input.heldKeys = {}
@@ -2597,7 +2862,7 @@ toggleServerInfo = function()
 end
 
 -- ============================================
--- OPTIONS PANEL (NAPRAWIONY Z AUTO-SAVE TOGGLE)
+-- OPTIONS PANEL (NAPRAWIONY THEME SCROLL)
 -- ============================================
 local function createOptions()
     clearOptions()
@@ -3016,7 +3281,9 @@ local function createOptions()
         Options.themeScrollBounds = {
             pos = Vector2.new(px + Options.PAD, gridY),
             size = Vector2.new(Options.W - Options.PAD * 2, gridH),
-            maxScroll = maxThemeScroll
+            maxScroll = maxThemeScroll,
+            gridY = gridY,
+            gridH = gridH
         }
         
         if Options.themeTab == "accent" then
@@ -3171,6 +3438,11 @@ local function createOptions()
             scrollThumb.Position = Vector2.new(scrollbarX, thumbY)
             scrollThumb.Size = Vector2.new(5, thumbH)
             table_insert(els, scrollThumb)
+            
+            Options.themeScrollBounds.scrollbarX = scrollbarX
+            Options.themeScrollBounds.scrollbarY = scrollbarY
+            Options.themeScrollBounds.scrollbarH = scrollbarH
+            Options.themeScrollBounds.thumbH = thumbH
         end
         
     elseif Options.tab == "general" then
@@ -3314,7 +3586,7 @@ local function createOptions()
     
     local footerText = Drawing.new("Text")
     footerText.Visible = true
-    footerText.Text = "Severe Admin v3.4"
+    footerText.Text = "Severe Admin v3.5"
     footerText.Size = 10
     footerText.Color = Theme.TextMuted
     footerText.Outline = true
@@ -3813,7 +4085,7 @@ local function createBar()
 end
 
 -- ============================================
--- INPUT HANDLING (NAPRAWIONY - SCROLLBAR DRAGGING)
+-- INPUT HANDLING
 -- ============================================
 local keyMap = {
     A="a",B="b",C="c",D="d",E="e",F="f",G="g",H="h",I="i",J="j",K="k",L="l",M="m",
@@ -3906,6 +4178,7 @@ local function updateLogic(dt)
     updateFov()
     updateThirdPerson()
     updateInstantInteract()
+    updateSpinbot(dt)
     
     if Features.clickTpEnabled then
         local now = os_clock()
@@ -4032,6 +4305,39 @@ local function updateInput()
         end
     end
     
+    -- Options theme scrollbar drag (NAPRAWIONY)
+    if Options.open and Options.tab == "theme" and Options.themeScrollBounds and Options.themeScrollBounds.scrollbarX then
+        local sb = Options.themeScrollBounds
+        local scrollbarX = sb.scrollbarX
+        local scrollbarY = sb.scrollbarY or sb.gridY
+        local scrollbarH = sb.scrollbarH or sb.gridH
+        
+        if mClick and mPos.X >= scrollbarX - 5 and mPos.X <= scrollbarX + 10 and mPos.Y >= scrollbarY and mPos.Y <= scrollbarY + scrollbarH then
+            Options.themeScrollDragging = true
+            Options.themeScrollDragStartY = mPos.Y
+            Options.themeScrollDragStartOffset = Options.themeScroll
+        end
+    end
+    
+    if Options.themeScrollDragging then
+        if mDown then
+            local sb = Options.themeScrollBounds
+            if sb and sb.maxScroll > 0 then
+                local scrollbarH = sb.scrollbarH or sb.gridH
+                local thumbH = sb.thumbH or 30
+                local dragDelta = mPos.Y - Options.themeScrollDragStartY
+                local scrollPerPixel = sb.maxScroll / math.max(1, (scrollbarH - thumbH))
+                Options.themeTargetScroll = math_clamp(
+                    Options.themeScrollDragStartOffset + dragDelta * scrollPerPixel,
+                    0, sb.maxScroll
+                )
+                Options.needsRedraw = true
+            end
+        else
+            Options.themeScrollDragging = false
+        end
+    end
+    
     -- Watermark dragging
     if Settings.watermarkEnabled and Watermark.bounds and #Watermark.elements > 0 then
         if mClick and inRect(mPos, Watermark.bounds.pos, Watermark.bounds.size) then
@@ -4056,7 +4362,7 @@ local function updateInput()
     
     -- ClickTP
     if Features.clickTpEnabled and not Bar.open and not CommandPanel.open and not Options.open and not ServerInfo.open then
-        if mClick and not Watermark.dragging and not CommandPanelDrawing.scrollDragging and not Options.scrollDragging then
+        if mClick and not Watermark.dragging and not CommandPanelDrawing.scrollDragging and not Options.scrollDragging and not Options.themeScrollDragging then
             local clickedKeybindsGui = false
             if KeybindsGui.open and KeybindsGui.headerBounds then
                 local features = getActiveFeatures()
@@ -4219,7 +4525,7 @@ local function updateInput()
             return
         end
         if mClick and Options.headerBounds and inRect(mPos, Options.headerBounds.pos, Options.headerBounds.size) then
-            if not Options.scrollDragging then
+            if not Options.scrollDragging and not Options.themeScrollDragging then
                 Options.dragging = true
                 Options.dragOffset = Vector2.new(mPos.X - Options.posX, mPos.Y - Options.posY)
             end
@@ -4228,13 +4534,14 @@ local function updateInput()
             if Options.dragging then saveSettings() end
             Options.dragging = false
             Options.scrollDragging = false
+            Options.themeScrollDragging = false
         end
         if Options.dragging then
             Options.posX = mPos.X - Options.dragOffset.X
             Options.posY = mPos.Y - Options.dragOffset.Y
             Options.needsRedraw = true
         end
-        if mClick and not Options.dragging and not Options.scrollDragging then
+        if mClick and not Options.dragging and not Options.scrollDragging and not Options.themeScrollDragging then
             for tabId, bounds in pairs(Options.tabBounds) do
                 if inRect(mPos, bounds.pos, bounds.size) then
                     if tabId == "theme_accent" then Options.themeTab = "accent" Options.themeScroll = 0 Options.themeTargetScroll = 0
@@ -4328,10 +4635,7 @@ local function updateInput()
                         elseif item.id == "autoSave" then
                             Settings.autoSaveEnabled = not Settings.autoSaveEnabled
                             notify(Settings.autoSaveEnabled and "Auto-Save enabled" or "Auto-Save disabled")
-                            local tempAutoSave = Settings.autoSaveEnabled
-                            Settings.autoSaveEnabled = true
                             saveSettings()
-                            Settings.autoSaveEnabled = tempAutoSave
                         end
                         Options.needsRedraw = true
                         break
