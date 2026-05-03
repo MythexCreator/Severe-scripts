@@ -1,0 +1,822 @@
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+local WasLeftDown, WasInsertDown, WasUpDown, WasDownDown = false, false, false, false
+local WasSpaceDown, WasCarKeyDown, WasBikeKeyDown = false, false, false
+local FrameN = 0
+
+local function GetMouse() return UIS:GetMouseLocation() end
+local function IsLeftDown() return isleftpressed() end
+local function GetKeys() return getpressedkeys() end
+local function HasKey(keys, key) for _,k in keys do if k==key then return true end end return false end
+local function GetRP() return LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") end
+local function GetHum() return LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") end
+local function GetChar() return LocalPlayer.Character end
+
+local MenuOpen, ActiveTab = true, "Movement"
+local Dragging, DragOffset = false, Vector2.new(0,0)
+local PanelPos, PanelSz = Vector2.new(100,60), Vector2.new(540,420)
+local SideW, ScrollY, MaxScr = 135, 0, 0
+local ActSlider, ShowSideMenu, CapturingKeybind = nil, nil, nil
+local TogStates, SlVals = {}, {}
+local CarFlyKey, BikeFlyKey = "C", "B"
+local LastStablePos = nil
+local AutoBuyTarget = nil
+local SelectedPlayer = nil
+
+local OFF = {WS=0x1DC, WC=0x3C4, JP=0x1B0, HP=0x194}
+
+local C = {
+    Bg=Color3.fromRGB(10,10,10), Side=Color3.fromRGB(6,6,6),
+    TabOn=Color3.fromRGB(85,40,190), TabOff=Color3.fromRGB(18,18,18),
+    Acc=Color3.fromRGB(105,55,210), Txt=Color3.fromRGB(215,215,215),
+    Dim=Color3.fromRGB(100,100,100), TgOn=Color3.fromRGB(105,55,210),
+    TgOff=Color3.fromRGB(32,32,32), SlBg=Color3.fromRGB(22,22,22),
+    SlFl=Color3.fromRGB(105,55,210), Sec=Color3.fromRGB(14,14,14),
+    Brd=Color3.fromRGB(28,28,28), Wht=Color3.fromRGB(255,255,255),
+    Btn=Color3.fromRGB(25,25,25), KeyOn=Color3.fromRGB(60,30,120),
+    ScB=Color3.fromRGB(45,45,45), ScT=Color3.fromRGB(105,55,210),
+    Red=Color3.fromRGB(40,15,15),
+}
+
+local Teleports = {
+    Guns = {
+        {"AK47",          Vector3.new(-587,5,-753),    "$2532"},
+        {"Double Barrel", Vector3.new(20,26,-834),     "$1519"},
+        {"Revolver",      Vector3.new(-868,-35,-529),  "$1463"},
+        {"Glock",         Vector3.new(-272,19,-83),    "$338"},
+        {"RPG",           Vector3.new(113,-30,-267),   "$22510"},
+        {"Tactical SG",   Vector3.new(470,45,-620),    "$1970"},
+        {"Silencer AR",   Vector3.new(490,45,-633),    "$1407"},
+        {"LMG",           Vector3.new(-617,20,-305),   "$4221"},
+        {"AUG",           Vector3.new(-273,49,-213),   "$2195"},
+        {"P90",           Vector3.new(463,45,-619),    "$1126"},
+        {"SMG",           Vector3.new(-810,-42,-942),  "$844"},
+        {"Drum Gun",      Vector3.new(-1177,25,-530),  "$3377"},
+    },
+    Ammo = {
+        {"AR Ammo x100",      Vector3.new(-592,5,-751),   "$84"},
+        {"Revolver Ammo x12", Vector3.new(533,1,-257),    "$56"},
+        {"Shotgun Ammo x20",  Vector3.new(-578,5,-747),   "$68"},
+        {"Glock Ammo x30",    Vector3.new(-255,18,-98),   "$68"},
+        {"RPG Ammo x5",       Vector3.new(-795,-42,-928), "$1126"},
+        {"AUG Ammo x90",      Vector3.new(-278,49,-213),  "$90"},
+        {"SMG Ammo x80",      Vector3.new(-582,5,-717),   "$68"},
+        {"P90 Ammo x120",     Vector3.new(462,45,-624),   "$68"},
+        {"LMG Ammo x200",     Vector3.new(-616,20,-305),  "$338"},
+    },
+    Food = {
+        {"Chicken",   Vector3.new(-795,-42,-938), "$8"},
+        {"Pizza",     Vector3.new(-322,24,-285),  "$6"},
+        {"Hamburger", Vector3.new(-275,20,-807),  "$6"},
+        {"Donut",     Vector3.new(-605,18,274),   "$11"},
+        {"Taco",      Vector3.new(584,48,-474),   "$2"},
+        {"Lemonade",  Vector3.new(-262,23,-507),  "$3"},
+        {"Da Milk",   Vector3.new(-901,19,-662),  "$8"},
+        {"Flowers",   Vector3.new(-74,20,-307),   "$6"},
+    },
+    Tools = {
+        {"Weights",       Vector3.new(-55,20,-656),   "$135"},
+        {"Heavy Weights", Vector3.new(-46,20,-656),   "$281"},
+        {"Bat",           Vector3.new(380,45,-282),   "$281"},
+        {"Knife",         Vector3.new(-277,18,-236),  "$169"},
+        {"Shovel",        Vector3.new(147,18,31),     "$360"},
+        {"Lockpicker",    Vector3.new(-219,18,-820),  "$113"},
+        {"Key",           Vector3.new(-270,18,-238),  "$141"},
+        {"Pepper Spray",  Vector3.new(586,46,-248),   "$84"},
+        {"Whip",          Vector3.new(-68,52,-241),   "$281"},
+    }
+}
+
+local Tabs = {"Movement","Player","Teleports","Vehicle","Players"}
+
+local Opts = {
+    Movement = {
+        {Type="Section", Name="Speed"},
+        {Type="Toggle", Key="speed_on",   Name="Speed Hack",       Default=false},
+        {Type="Slider", Key="speed_val",  Name="Walk Speed",       Default=16, Min=16, Max=300},
+        {Type="Section", Name="Jump"},
+        {Type="Toggle", Key="jump_on",    Name="Jump Power Mod",   Default=false},
+        {Type="Slider", Key="jump_val",   Name="Jump Power",       Default=50, Min=50, Max=500},
+        {Type="Toggle", Key="inf_jump",   Name="Infinite Jump",    Default=false},
+        {Type="Toggle", Key="no_jump_cd", Name="No Jump Cooldown", Default=false},
+        {Type="Section", Name="Misc"},
+        {Type="Toggle", Key="noclip",     Name="Noclip",           Default=false},
+        {Type="Toggle", Key="anti_void",  Name="Anti Void",        Default=false},
+        {Type="Toggle", Key="anti_slow",  Name="Anti Slow (Guns)", Default=false},
+    },
+    Player = {
+        {Type="Section", Name="Survival"},
+        {Type="Toggle", Key="auto_heal",    Name="Auto Heal",          Default=false},
+        {Type="Toggle", Key="auto_armor",   Name="Auto Armor",         Default=false},
+        {Type="Toggle", Key="anti_stomp",   Name="Anti Stomp",         Default=false},
+        {Type="Section", Name="Auto Buy"},
+        {Type="Button",  Key="open_gun_buy", Name="Select Gun to Buy"},
+        {Type="Slider",  Key="ammo_amt",     Name="Ammo Buy Count",    Default=1, Min=1, Max=10},
+        {Type="Section", Name="Economy"},
+        {Type="Toggle", Key="auto_pickup",  Name="Auto Pickup Cash",   Default=false},
+        {Type="Slider", Key="pickup_rng",   Name="Pickup Range",       Default=20, Min=5, Max=100},
+    },
+    Teleports = {
+        {Type="Section", Name="Categories"},
+        {Type="Button", Key="tp_guns",     Name="Guns Store"},
+        {Type="Button", Key="tp_ammo",     Name="Ammo Store"},
+        {Type="Button", Key="tp_food",     Name="Food & Drinks"},
+        {Type="Button", Key="tp_tools",    Name="Tools"},
+        {Type="Section", Name="Quick TP"},
+        {Type="Button", Key="tp_closest",  Name="Closest Player"},
+        {Type="Button", Key="tp_bank",     Name="Bank"},
+        {Type="Button", Key="tp_jewelry",  Name="Jewelry"},
+        {Type="Button", Key="tp_hospital", Name="Hospital"},
+        {Type="Button", Key="tp_atm",      Name="ATM"},
+    },
+    Vehicle = {
+        {Type="Section",  Name="Car Fly"},
+        {Type="Toggle",   Key="car_fly",      Name="Car Fly",       Default=false},
+        {Type="Slider",   Key="car_fly_spd",  Name="Car Fly Speed", Default=5, Min=1, Max=30},
+        {Type="Keybind",  Key="car_fly_key",  Name="Car Fly Key"},
+        {Type="Section",  Name="Bike Fly"},
+        {Type="Toggle",   Key="bike_fly",     Name="Bike Fly",      Default=false},
+        {Type="Slider",   Key="bike_fly_spd", Name="Bike Fly Speed",Default=5, Min=1, Max=30},
+        {Type="Keybind",  Key="bike_fly_key", Name="Bike Fly Key"},
+    },
+    Players = {},
+}
+
+for _,items in Opts do
+    for _,it in items do
+        if it.Type=="Toggle" then TogStates[it.Key]=it.Default
+        elseif it.Type=="Slider" then SlVals[it.Key]=it.Default end
+    end
+end
+local DC = {}
+local function Make(cls, p)
+    local o = Drawing.new(cls)
+    if o and p then for k,v in p do o[k]=v end end
+    table.insert(DC,o) return o
+end
+local function ClearAll() for _,o in DC do pcall(function() o:Remove() end) end table.clear(DC) end
+
+local R = {}
+
+local function Build()
+    local cSY = PanelPos.Y + 36
+    local cH  = PanelSz.Y - 40
+
+    -- Background
+    Make("Square",{Visible=true,Filled=true,Color=C.Bg,Size=PanelSz,Position=PanelPos,Opacity=0.98,ZIndex=100,Rounding=6})
+    Make("Square",{Visible=true,Filled=false,Color=C.Brd,Size=PanelSz,Position=PanelPos,Thickness=1,ZIndex=101,Rounding=6})
+
+    -- Sidebar
+    Make("Square",{Visible=true,Filled=true,Color=C.Side,Size=Vector2.new(SideW,PanelSz.Y),Position=PanelPos,ZIndex=102,Rounding=6})
+    Make("Square",{Visible=true,Filled=false,Color=C.Brd,Size=Vector2.new(SideW,PanelSz.Y),Position=PanelPos,Thickness=1,ZIndex=103,Rounding=6})
+
+    -- Accent line
+    Make("Square",{Visible=true,Filled=true,Color=C.Acc,Size=Vector2.new(PanelSz.X,2),Position=PanelPos,ZIndex=110})
+
+    -- Title
+    Make("Text",{Visible=true,Text="SEVERE",Size=18,Color=C.Acc,Position=PanelPos+Vector2.new(SideW/2,14),Center=true,Outline=true,OutlineColor=Vector3.new(0,0,0),Font=0,ZIndex=115})
+    Make("Text",{Visible=true,Text="da hood",Size=11,Color=C.Dim,Position=PanelPos+Vector2.new(SideW/2,34),Center=true,Outline=true,OutlineColor=Vector3.new(0,0,0),Font=0,ZIndex=115})
+    Make("Square",{Visible=true,Filled=true,Color=C.Brd,Size=Vector2.new(SideW-20,1),Position=PanelPos+Vector2.new(10,54),ZIndex=110})
+    Make("Text",{Visible=true,Text="INSERT to hide",Size=9,Color=C.Dim,Position=PanelPos+Vector2.new(SideW/2,PanelSz.Y-14),Center=true,Font=0,ZIndex=115})
+
+    -- Tabs
+    R.TabR = {}
+    for i,tn in Tabs do
+        local y = PanelPos.Y+60+(i-1)*34
+        local on = tn==ActiveTab
+        Make("Square",{Visible=true,Filled=true,Color=on and C.TabOn or C.TabOff,Size=Vector2.new(SideW-16,28),Position=Vector2.new(PanelPos.X+8,y),ZIndex=105,Rounding=5})
+        if on then Make("Square",{Visible=true,Filled=true,Color=C.Acc,Size=Vector2.new(3,20),Position=Vector2.new(PanelPos.X+8,y+4),ZIndex=106}) end
+        Make("Text",{Visible=true,Text=tn,Size=12,Color=on and C.Wht or C.Dim,Position=Vector2.new(PanelPos.X+20,y+7),ZIndex=106,Outline=true})
+        R.TabR[i] = {P=Vector2.new(PanelPos.X+8,y), S=Vector2.new(SideW-16,28)}
+    end
+
+    local cX = PanelPos.X+SideW+15
+    local cW = PanelSz.X-SideW-30
+    R.IR = {}
+    R.PlayerBtns = {}
+    local yPos = 0
+
+    -- Players Tab
+    if ActiveTab == "Players" then
+        local playerList = Players:GetPlayers()
+        local sY = cSY+yPos-ScrollY
+        if sY+22 > cSY and sY < cSY+cH then
+            Make("Square",{Visible=true,Filled=true,Color=C.Sec,Size=Vector2.new(cW,20),Position=Vector2.new(cX,sY),ZIndex=104,Rounding=3})
+            Make("Text",{Visible=true,Text="ALL PLAYERS ("..tostring(#playerList)..")",Size=11,Color=C.Acc,Position=Vector2.new(cX+7,sY+4),ZIndex=107,Outline=true})
+        end
+        yPos += 26
+
+        for idx, plr in playerList do
+            if plr == LocalPlayer then continue end
+            local pY = cSY+yPos-ScrollY
+            if pY+24 > cSY and pY < cSY+cH then
+                local isSelected = SelectedPlayer == plr
+                Make("Square",{Visible=true,Filled=true,Color=isSelected and C.TabOn or C.Btn,Size=Vector2.new(cW,22),Position=Vector2.new(cX,pY),ZIndex=104,Rounding=4})
+                local letter = plr.DisplayName:sub(1,1):upper()
+                Make("Circle",{Visible=true,Filled=true,Color=C.Acc,Radius=8,Position=Vector2.new(cX+14,pY+11),ZIndex=106,NumSides=20})
+                Make("Text",{Visible=true,Text=letter,Size=10,Color=C.Wht,Position=Vector2.new(cX+14,pY+5),Center=true,ZIndex=107,Outline=true})
+                local displayText = plr.DisplayName.." ("..plr.Name..")"
+                Make("Text",{Visible=true,Text=displayText,Size=11,Color=C.Txt,Position=Vector2.new(cX+28,pY+5),ZIndex=107,Outline=true})
+                R.PlayerBtns[idx] = {P=Vector2.new(cX,pY), S=Vector2.new(cW,22), Player=plr}
+            end
+            yPos += 24
+        end
+
+    else
+        -- Normal tabs
+        for _, item in Opts[ActiveTab] or {} do
+            local sY = cSY+yPos-ScrollY
+            local iH = 22
+            if item.Type=="Section" then iH=26
+            elseif item.Type=="Slider" then iH=32 end
+
+            if sY+iH > cSY and sY < cSY+cH then
+                if item.Type=="Section" then
+                    Make("Square",{Visible=true,Filled=true,Color=C.Sec,Size=Vector2.new(cW,20),Position=Vector2.new(cX,sY),ZIndex=104,Rounding=3})
+                    Make("Text",{Visible=true,Text=item.Name:upper(),Size=11,Color=C.Acc,Position=Vector2.new(cX+7,sY+4),ZIndex=107,Outline=true})
+
+                elseif item.Type=="Toggle" then
+                    Make("Text",{Visible=true,Text=item.Name,Size=12,Color=C.Txt,Position=Vector2.new(cX+5,sY+4),ZIndex=107,Outline=true})
+                    local on = TogStates[item.Key]
+                    local tbg = Make("Square",{Visible=true,Filled=true,Color=on and C.TgOn or C.TgOff,Size=Vector2.new(30,14),Position=Vector2.new(cX+cW-36,sY+4),ZIndex=107,Rounding=7})
+                    Make("Circle",{Visible=true,Filled=true,Color=C.Wht,Radius=5,Position=Vector2.new(tbg.Position.X+(on and 17 or 2)+5,tbg.Position.Y+7),ZIndex=108})
+                    R.IR[item.Key] = {P=Vector2.new(cX,sY), S=Vector2.new(cW,22), I=item}
+
+                elseif item.Type=="Slider" then
+                    Make("Text",{Visible=true,Text=item.Name..": "..tostring(SlVals[item.Key]),Size=11,Color=C.Txt,Position=Vector2.new(cX+5,sY+1),ZIndex=107,Outline=true})
+                    local sbg = Make("Square",{Visible=true,Filled=true,Color=C.SlBg,Size=Vector2.new(cW-10,5),Position=Vector2.new(cX+5,sY+19),ZIndex=106,Rounding=3})
+                    local pc = (SlVals[item.Key]-item.Min)/(item.Max-item.Min)
+                    Make("Square",{Visible=true,Filled=true,Color=C.SlFl,Size=Vector2.new(sbg.Size.X*pc,5),Position=sbg.Position,ZIndex=107,Rounding=3})
+                    R.IR[item.Key] = {P=Vector2.new(cX,sY), S=Vector2.new(cW,28), I=item, bg=sbg}
+
+                elseif item.Type=="Button" then
+                    local labelText = item.Name.."  →"
+                    if item.Key=="open_gun_buy" and AutoBuyTarget then
+                        labelText = "Gun: "..AutoBuyTarget.."  →"
+                    end
+                    Make("Square",{Visible=true,Filled=true,Color=C.Btn,Size=Vector2.new(cW,20),Position=Vector2.new(cX,sY),ZIndex=104,Rounding=4})
+                    Make("Text",{Visible=true,Text=labelText,Size=12,Color=C.Wht,Position=Vector2.new(cX+8,sY+3),ZIndex=107,Outline=true})
+                    R.IR[item.Key] = {P=Vector2.new(cX,sY), S=Vector2.new(cW,20), I=item}
+
+                elseif item.Type=="Keybind" then
+                    local isCar = item.Key=="car_fly_key"
+                    local curKey = isCar and CarFlyKey or BikeFlyKey
+                    local isCap = CapturingKeybind==(isCar and "car" or "bike")
+                    Make("Text",{Visible=true,Text=item.Name,Size=12,Color=C.Txt,Position=Vector2.new(cX+5,sY+4),ZIndex=107,Outline=true})
+                    local kbg = Make("Square",{Visible=true,Filled=true,Color=isCap and C.KeyOn or C.Btn,Size=Vector2.new(70,20),Position=Vector2.new(cX+cW-74,sY),ZIndex=107,Rounding=4})
+                    Make("Text",{Visible=true,Text=isCap and "..." or (curKey=="" and "NONE" or curKey),Size=12,Color=isCap and C.Acc or C.Wht,Position=Vector2.new(kbg.Position.X+35,sY+3),Center=true,ZIndex=108,Outline=true})
+                    R.IR[item.Key] = {P=kbg.Position, S=kbg.Size, I=item}
+                end
+            end
+            yPos += iH
+        end
+    end
+
+    MaxScr = math.max(0, yPos-cH)
+
+    -- Scrollbar
+    if MaxScr > 0 then
+        local thH = math.max(16,(cH/yPos)*cH)
+        local thY = (ScrollY/MaxScr)*(cH-thH)
+        Make("Square",{Visible=true,Filled=true,Color=C.ScB,Size=Vector2.new(3,cH),Position=Vector2.new(PanelPos.X+PanelSz.X-5,cSY),ZIndex=108,Rounding=2})
+        Make("Square",{Visible=true,Filled=true,Color=C.ScT,Size=Vector2.new(3,thH),Position=Vector2.new(PanelPos.X+PanelSz.X-5,cSY+thY),ZIndex=109,Rounding=2})
+    end
+
+    -- Teleport Side Menu
+    if ShowSideMenu and ShowSideMenu ~= "_PLAYER_" and Teleports[ShowSideMenu] then
+        local data = Teleports[ShowSideMenu]
+        local sx = PanelPos.X+PanelSz.X+8
+        local sy = PanelPos.Y
+        local sw = 185
+        local sh = #data*22+40
+        Make("Square",{Visible=true,Filled=true,Color=C.Bg,Size=Vector2.new(sw,sh),Position=Vector2.new(sx,sy),ZIndex=130,Rounding=6})
+        Make("Square",{Visible=true,Filled=false,Color=C.Brd,Size=Vector2.new(sw,sh),Position=Vector2.new(sx,sy),Thickness=1,ZIndex=131,Rounding=6})
+        Make("Square",{Visible=true,Filled=true,Color=C.Acc,Size=Vector2.new(sw,2),Position=Vector2.new(sx,sy),ZIndex=132})
+        Make("Text",{Visible=true,Text=ShowSideMenu:upper(),Size=13,Color=C.Acc,Position=Vector2.new(sx+12,sy+8),ZIndex=132,Outline=true})
+        R.SideBtns = {}
+        for i,v in data do
+            local bp = Vector2.new(sx+10, sy+30+(i-1)*22)
+            Make("Square",{Visible=true,Filled=true,Color=C.Btn,Size=Vector2.new(sw-16,20),Position=bp,ZIndex=132,Rounding=4})
+            Make("Text",{Visible=true,Text=v[1].." "..v[3],Size=11,Color=C.Wht,Position=bp+Vector2.new(8,3),ZIndex=133,Outline=true})
+            R.SideBtns[i] = {P=bp, S=Vector2.new(sw-16,20), Pos=v[2], Name=v[1]}
+        end
+    end
+
+    -- Player Profile Side Panel
+    if ShowSideMenu == "_PLAYER_" and SelectedPlayer then
+        local plr = SelectedPlayer
+        local sx = PanelPos.X+PanelSz.X+8
+        local sy = PanelPos.Y
+        local sw = 185
+        local sh = 290
+        Make("Square",{Visible=true,Filled=true,Color=C.Bg,Size=Vector2.new(sw,sh),Position=Vector2.new(sx,sy),ZIndex=130,Rounding=6})
+        Make("Square",{Visible=true,Filled=false,Color=C.Brd,Size=Vector2.new(sw,sh),Position=Vector2.new(sx,sy),Thickness=1,ZIndex=131,Rounding=6})
+        Make("Square",{Visible=true,Filled=true,Color=C.Acc,Size=Vector2.new(sw,2),Position=Vector2.new(sx,sy),ZIndex=132})
+
+        -- Avatar circle
+        local ax = sx+sw/2
+        local ay = sy+45
+        Make("Circle",{Visible=true,Filled=true,Color=C.Acc,Radius=26,Position=Vector2.new(ax,ay),ZIndex=132,NumSides=30})
+        Make("Circle",{Visible=true,Filled=false,Color=C.Wht,Radius=27,Position=Vector2.new(ax,ay),ZIndex=133,NumSides=30,Thickness=2})
+        Make("Text",{Visible=true,Text=plr.DisplayName:sub(1,1):upper(),Size=24,Color=C.Wht,Position=Vector2.new(ax,ay-13),Center=true,ZIndex=133,Outline=true})
+
+        -- Info
+        Make("Text",{Visible=true,Text=plr.DisplayName,Size=14,Color=C.Wht,Position=Vector2.new(ax,sy+78),Center=true,ZIndex=132,Outline=true})
+        Make("Text",{Visible=true,Text="@"..plr.Name,Size=11,Color=C.Dim,Position=Vector2.new(ax,sy+94),Center=true,ZIndex=132,Outline=true})
+        Make("Text",{Visible=true,Text="ID: "..tostring(plr.UserId),Size=10,Color=C.Dim,Position=Vector2.new(ax,sy+108),Center=true,ZIndex=132,Outline=true})
+        Make("Square",{Visible=true,Filled=true,Color=C.Brd,Size=Vector2.new(sw-20,1),Position=Vector2.new(sx+10,sy+122),ZIndex=132})
+
+        -- Action buttons
+        R.ProfileBtns = {}
+        local isSpectating = SelectedPlayer and workspace.CurrentCamera.CameraSubject ~= GetHum()
+        local actions = {
+            {Name=isSpectating and "Unspectate" or "Spectate", Key="spectate"},
+            {Name="Goto",      Key="goto"},
+            {Name="Bring",     Key="bring"},
+            {Name="Fling",     Key="fling"},
+            {Name="Kill",      Key="kill"},
+            {Name="Loop Kill", Key="loopkill"},
+            {Name="Copy Name", Key="copyname"},
+        }
+        for i,action in actions do
+            local by = sy+128+(i-1)*22
+            local col = (action.Key=="fling" or action.Key=="kill" or action.Key=="loopkill") and C.Red or
+                        (action.Key=="spectate" and isSpectating and C.TabOn or C.Btn)
+            Make("Square",{Visible=true,Filled=true,Color=col,Size=Vector2.new(sw-16,20),Position=Vector2.new(sx+8,by),ZIndex=132,Rounding=4})
+            Make("Text",{Visible=true,Text=action.Name,Size=12,Color=C.Wht,Position=Vector2.new(sx+sw/2,by+3),Center=true,ZIndex=133,Outline=true})
+            R.ProfileBtns[i] = {P=Vector2.new(sx+8,by), S=Vector2.new(sw-16,20), Key=action.Key}
+        end
+    end
+end
+
+local function Kill() ClearAll() R={} end
+local function Refresh() Kill() if MenuOpen then Build() end end
+local function Hit(p,rP,rS) return p.X>=rP.X and p.X<=rP.X+rS.X and p.Y>=rP.Y and p.Y<=rP.Y+rS.Y end
+local function ForceReset()
+    task.spawn(function()
+        local hum = GetHum()
+        if hum then pcall(function() memory.writef32(hum, OFF.HP, 0) end) end
+    end)
+end
+
+local function HasGun(name)
+    local char = GetChar()
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if char then for _,v in char:GetChildren() do if v:IsA("Tool") and string.find(v.Name,name) then return true end end end
+    if bp then for _,v in bp:GetChildren() do if v:IsA("Tool") and string.find(v.Name,name) then return true end end end
+    return false
+end
+
+local function BuyItem(itemName)
+    local rp = GetRP()
+    local cam = workspace.CurrentCamera
+    if not rp or not cam then return false end
+    for _,v in workspace:GetDescendants() do
+        if v:IsA("Model") and string.find(v.Name, itemName) then
+            local head = v:FindFirstChild("Head")
+            local cd = v:FindFirstChildOfClass("ClickDetector")
+            if head and cd then
+                local oldCF = rp.CFrame
+                rp.CFrame = CFrame.new(head.Position + Vector3.new(0,2,0))
+                task.wait(0.2)
+                local sPos, onScr = cam:WorldToScreenPoint(head.Position)
+                if onScr then
+                    mousemoveabs(sPos.X, sPos.Y)
+                    task.wait(0.1)
+                    mouse1press()
+                    task.wait(0.05)
+                    mouse1release()
+                    task.wait(0.2)
+                end
+                rp.CFrame = oldCF
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Vehicle Fly Loop
+task.spawn(function()
+    while true do
+        task.wait(0.016)
+        if not (TogStates.car_fly or TogStates.bike_fly) then continue end
+        local keys = getpressedkeys()
+        local cam = workspace.CurrentCamera
+        if not cam then continue end
+        local sName = TogStates.car_fly and "CarControlScript" or "ControlScript"
+        local spd = (TogStates.car_fly and SlVals.car_fly_spd or SlVals.bike_fly_spd) * 15
+        local scr = LocalPlayer.Backpack:FindFirstChild(sName)
+        if scr then
+            local obj = scr:FindFirstChild("Object")
+            if obj and obj.Value then
+                local veh = obj.Value
+                local look = cam.LookVector
+                local right = cam.RightVector
+                local dx,dy,dz = 0,0,0
+                for _,k in keys do
+                    if k=="W" then dx=dx+look.X dy=dy+look.Y dz=dz+look.Z end
+                    if k=="S" then dx=dx-look.X dy=dy-look.Y dz=dz-look.Z end
+                    if k=="A" then dx=dx-right.X dy=dy-right.Y dz=dz-right.Z end
+                    if k=="D" then dx=dx+right.X dy=dy+right.Y dz=dz+right.Z end
+                    if k=="E" then dy=dy+1 end
+                    if k=="Q" then dy=dy-1 end
+                end
+                local mag = math.sqrt(dx*dx+dy*dy+dz*dz)
+                if mag > 0 then
+                    pcall(function() veh.Velocity = Vector3.new(dx/mag*spd, dy/mag*spd, dz/mag*spd) end)
+                else
+                    pcall(function() veh.Velocity = Vector3.new(0,0,0) end)
+                end
+            end
+        end
+    end
+end)
+
+-- Auto Buy Loop
+task.spawn(function()
+    local lastDead = false
+    while true do
+        task.wait(1)
+        if not AutoBuyTarget then lastDead=false continue end
+        local hum = GetHum()
+        if not hum then lastDead=true continue end
+        local isDead = hum.Health <= 0
+        if isDead then lastDead=true continue end
+        if lastDead and not isDead then
+            task.wait(3)
+            local attempts = 0
+            while not HasGun(AutoBuyTarget) and attempts < 10 do
+                attempts += 1
+                BuyItem(AutoBuyTarget)
+                task.wait(1.5)
+            end
+            local ammoCount = SlVals.ammo_amt or 1
+            for i = 1, ammoCount do
+                for _, ammoData in Teleports.Ammo do
+                    if string.find(ammoData[1]:lower(), AutoBuyTarget:lower():sub(1,3)) then
+                        BuyItem(ammoData[1]:sub(1,(string.find(ammoData[1]," ") or 99)-1))
+                        task.wait(0.8)
+                        break
+                    end
+                end
+            end
+            lastDead = false
+        end
+    end
+end)
+
+-- Loop Kill tracker
+local LoopKillTarget = nil
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if not LoopKillTarget then continue end
+        local hum = LoopKillTarget.Character and LoopKillTarget.Character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() memory.writef32(hum, OFF.HP, 0) end)
+        end
+    end
+end)
+
+local function DoLogic()
+    local char = GetChar()
+    local hum = GetHum()
+    local rp = GetRP()
+    local keys = GetKeys()
+
+    -- Speed
+    if hum and FrameN % 10 == 0 then
+        if TogStates.speed_on then
+            local val = SlVals.speed_val
+            if memory.readf32(hum,OFF.WS) ~= val then
+                memory.writef32(hum,OFF.WS,val)
+                memory.writef32(hum,OFF.WC,val)
+            end
+        end
+    end
+
+    -- Jump Power
+    if hum and FrameN % 10 == 0 then
+        if TogStates.jump_on then
+            local val = SlVals.jump_val
+            if memory.readf32(hum,OFF.JP) ~= val then memory.writef32(hum,OFF.JP,val) end
+        end
+    end
+
+    -- No Jump Cooldown
+    if hum and TogStates.no_jump_cd and FrameN % 3 == 0 then
+        memory.writef32(hum, OFF.JP, TogStates.jump_on and SlVals.jump_val or 50)
+    end
+
+    -- Infinite Jump
+    if rp and TogStates.inf_jump then
+        local space = HasKey(keys,"Space")
+        if space and not WasSpaceDown and rp.Velocity.Y ~= 0 then
+            rp.Velocity = Vector3.new(rp.Velocity.X, 50, rp.Velocity.Z)
+        end
+        WasSpaceDown = space
+    end
+
+    -- Anti Void
+    if rp and TogStates.anti_void then
+        if math.abs(rp.Velocity.Y) < 1.5 then LastStablePos = rp.CFrame end
+        if rp.Position.Y < -40 and LastStablePos then
+            rp.CFrame = LastStablePos
+            rp.Velocity = Vector3.new(0,0,0)
+        end
+    end
+
+    -- Anti Stomp
+    if char and TogStates.anti_stomp and FrameN % 3 == 0 then
+        local be = char:FindFirstChild("BodyEffects")
+        if be then
+            for _,v in be:GetChildren() do
+                if v:IsA("BoolValue") and v.Value == true then
+                    local n = v.Name:lower()
+                    if n:find("ko") or n:find("knock") or n:find("down") or n:find("ragdoll") then
+                        ForceReset()
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Noclip
+    if char and TogStates.noclip then
+        for _,v in char:GetDescendants() do
+            if v:IsA("BasePart") and v.CanCollide then v.CanCollide = false end
+        end
+    end
+
+    -- Anti Slow
+    if hum and TogStates.anti_slow and not TogStates.speed_on and FrameN % 10 == 0 then
+        local ws = memory.readf32(hum, OFF.WS)
+        if ws > 0 and ws < 14 then
+            memory.writef32(hum, OFF.WS, 16)
+            memory.writef32(hum, OFF.WC, 16)
+        end
+    end
+
+    -- Auto Heal
+    if char and hum and TogStates.auto_heal and FrameN % 60 == 0 then
+        if hum.Health < hum.MaxHealth * 0.6 then
+            local bp = LocalPlayer:FindFirstChild("Backpack")
+            if bp then
+                for _,t in bp:GetChildren() do
+                    local n = t.Name:lower()
+                    if n:find("heal") or n:find("med") or n:find("bandage") then
+                        t.Parent = char break
+                    end
+                end
+            end
+        end
+    end
+
+    -- Auto Armor
+    if char and TogStates.auto_armor and FrameN % 60 == 0 then
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        if bp then
+            for _,t in bp:GetChildren() do
+                local n = t.Name:lower()
+                if n:find("armor") or n:find("vest") then t.Parent = char break end
+            end
+        end
+    end
+
+    -- Auto Pickup Cash
+    if rp and TogStates.auto_pickup and FrameN % 30 == 0 then
+        local ign = workspace:FindFirstChild("Ignored")
+        if ign then
+            for _,v in ign:GetChildren() do
+                if v.Name:lower():find("cash") then
+                    local ok,pos = pcall(function() return v.Position end)
+                    if ok then
+                        local d = v.Position - rp.Position
+                        if math.sqrt(d.X*d.X+d.Y*d.Y+d.Z*d.Z) < SlVals.pickup_rng then
+                            v.CFrame = rp.CFrame
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Vehicle keybinds
+    if not CapturingKeybind then
+        local carDown = HasKey(keys, CarFlyKey)
+        if carDown and not WasCarKeyDown then TogStates.car_fly = not TogStates.car_fly Refresh() end
+        WasCarKeyDown = carDown
+        local bikeDown = HasKey(keys, BikeFlyKey)
+        if bikeDown and not WasBikeKeyDown then TogStates.bike_fly = not TogStates.bike_fly Refresh() end
+        WasBikeKeyDown = bikeDown
+    end
+
+    -- Keybind capture
+    if CapturingKeybind then
+        for _,k in keys do
+            if k ~= "Insert" then
+                if CapturingKeybind=="car" then CarFlyKey=k else BikeFlyKey=k end
+                CapturingKeybind=nil Refresh() break
+            end
+        end
+    end
+end
+
+-- Render Loop
+RunService.Render:Connect(function()
+    FrameN += 1
+    local m = GetMouse()
+    local ld = IsLeftDown()
+    local jc = ld and not WasLeftDown
+    local ks = GetKeys()
+
+    if HasKey(ks,"Insert") and not WasInsertDown then
+        MenuOpen = not MenuOpen
+        if not MenuOpen then ShowSideMenu=nil end
+        Refresh()
+    end
+    WasInsertDown = HasKey(ks,"Insert")
+
+    DoLogic()
+
+    if not MenuOpen then WasLeftDown=ld return end
+
+    -- Scroll
+    if Hit(m, PanelPos, PanelSz) then
+        if HasKey(ks,"Up") and not WasUpDown then ScrollY=math.clamp(ScrollY-25,0,MaxScr) Refresh() end
+        if HasKey(ks,"Down") and not WasDownDown then ScrollY=math.clamp(ScrollY+25,0,MaxScr) Refresh() end
+    end
+    WasUpDown = HasKey(ks,"Up")
+    WasDownDown = HasKey(ks,"Down")
+
+    -- Drag
+    if Dragging and ld then PanelPos=m-DragOffset Refresh()
+    elseif not ld then Dragging=false end
+
+    if jc then
+        -- Header drag
+        if Hit(m, PanelPos, Vector2.new(PanelSz.X,35)) then
+            local onTab = false
+            for _,r in R.TabR or {} do if Hit(m,r.P,r.S) then onTab=true break end end
+            if not onTab then Dragging=true DragOffset=m-PanelPos end
+        end
+
+        -- Tab clicks
+        for i,r in R.TabR or {} do
+            if Hit(m,r.P,r.S) then
+                if ActiveTab ~= Tabs[i] then
+                    ActiveTab=Tabs[i] ScrollY=0 ShowSideMenu=nil SelectedPlayer=nil Refresh()
+                end
+                break
+            end
+        end
+
+        -- Player list clicks
+        if ActiveTab=="Players" and R.PlayerBtns then
+            for _,btn in R.PlayerBtns do
+                if Hit(m,btn.P,btn.S) then
+                    SelectedPlayer = btn.Player
+                    ShowSideMenu = "_PLAYER_"
+                    Refresh()
+                    break
+                end
+            end
+        end
+
+        -- Profile action buttons
+        if ShowSideMenu=="_PLAYER_" and R.ProfileBtns and SelectedPlayer then
+            for _,btn in R.ProfileBtns do
+                if Hit(m,btn.P,btn.S) then
+                    local plr = SelectedPlayer
+                    local k = btn.Key
+                    if k=="spectate" then
+                        local myHum = GetHum()
+                        if workspace.CurrentCamera.CameraSubject ~= myHum then
+                            workspace.CurrentCamera.CameraSubject = myHum
+                        else
+                            local th = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+                            if th then workspace.CurrentCamera.CameraSubject = th end
+                        end
+                        Refresh()
+                    elseif k=="goto" then
+                        local rp = GetRP()
+                        local th = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                        if rp and th then rp.CFrame = th.CFrame + Vector3.new(0,4,0) end
+                    elseif k=="bring" then
+                        local rp = GetRP()
+                        local th = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                        if rp and th then th.CFrame = rp.CFrame + Vector3.new(3,0,0) end
+                    elseif k=="fling" then
+                        local th = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+                        if th then
+                            pcall(function()
+                                th.Velocity = Vector3.new(math.random(-500,500), math.random(200,500), math.random(-500,500))
+                            end)
+                        end
+                    elseif k=="kill" then
+                        local th = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+                        if th then pcall(function() memory.writef32(th, OFF.HP, 0) end) end
+                    elseif k=="loopkill" then
+                        if LoopKillTarget == plr then
+                            LoopKillTarget = nil
+                        else
+                            LoopKillTarget = plr
+                        end
+                        Refresh()
+                    elseif k=="copyname" then
+                        pcall(function() setclipboard(plr.Name) end)
+                    end
+                    break
+                end
+            end
+        end
+
+        -- Normal content clicks
+        for k,r in R.IR or {} do
+            if Hit(m,r.P,r.S) then
+                local it = r.I
+                if it.Type=="Toggle" then
+                    TogStates[k]=not TogStates[k] Refresh()
+                elseif it.Type=="Slider" then
+                    ActSlider=k
+                elseif it.Type=="Keybind" then
+                    local which = k=="car_fly_key" and "car" or "bike"
+                    CapturingKeybind = CapturingKeybind==which and nil or which
+                    Refresh()
+                elseif it.Type=="Button" then
+                    if k=="open_gun_buy" then
+                        ShowSideMenu = ShowSideMenu=="Guns" and nil or "Guns"
+                        Refresh()
+                    elseif k=="tp_closest" then
+                        local best,dist = nil,9999
+                        local my = GetRP() and GetRP().Position
+                        if my then
+                            for _,p in Players:GetPlayers() do
+                                if p~=LocalPlayer and p.Character then
+                                    local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                                    if hrp then
+                                        local d = hrp.Position-my
+                                        local dm = math.sqrt(d.X*d.X+d.Y*d.Y+d.Z*d.Z)
+                                        if dm<dist then dist=dm best=hrp end
+                                    end
+                                end
+                            end
+                            if best then GetRP().CFrame = best.CFrame+Vector3.new(0,4,0) end
+                        end
+                    elseif k=="tp_bank" then local r=GetRP() if r then r.CFrame=CFrame.new(-382,37,-837) end
+                    elseif k=="tp_jewelry" then local r=GetRP() if r then r.CFrame=CFrame.new(148,18,-1674) end
+                    elseif k=="tp_hospital" then local r=GetRP() if r then r.CFrame=CFrame.new(790,18,-643) end
+                    elseif k=="tp_atm" then local r=GetRP() if r then r.CFrame=CFrame.new(-571,18,-250) end
+                    else
+                        local cats = {tp_guns="Guns", tp_ammo="Ammo", tp_food="Food", tp_tools="Tools"}
+                        local mapped = cats[k]
+                        if mapped then ShowSideMenu = ShowSideMenu==mapped and nil or mapped Refresh() end
+                    end
+                end
+                break
+            end
+        end
+
+        -- Teleport side menu clicks
+        if ShowSideMenu and ShowSideMenu~="_PLAYER_" and R.SideBtns then
+            for _,btn in R.SideBtns do
+                if Hit(m,btn.P,btn.S) then
+                    if ActiveTab=="Player" then
+                        AutoBuyTarget = btn.Name
+                        ShowSideMenu = nil
+                        Refresh()
+                    else
+                        local rp = GetRP()
+                        if rp then rp.CFrame = CFrame.new(btn.Pos) end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Slider drag
+    if ActSlider and ld then
+        local r = R.IR[ActSlider]
+        if r and r.bg then
+            local pc = math.clamp((m.X-r.bg.Position.X)/r.bg.Size.X, 0, 1)
+            SlVals[ActSlider] = math.floor(r.I.Min + pc*(r.I.Max-r.I.Min))
+            Refresh()
+        end
+    elseif not ld then ActSlider=nil end
+
+    WasLeftDown = ld
+end)
+
+Refresh()
+
+SevereUI = {
+    GetToggle = function(k) return TogStates[k] or false end,
+    GetSlider = function(k) return SlVals[k] or 0 end,
+    ToggleStates = TogStates,
+    SliderValues = SlVals,
+}
