@@ -1,6 +1,6 @@
 --!optimize 2
 -- ============================================
--- SEVERE ADMIN PANEL v3.0 (CUTE MODE + OPTIMIZED)
+-- SEVERE ADMIN PANEL v3.1 BETA
 -- ============================================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
