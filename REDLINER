@@ -1,0 +1,1199 @@
+--!optimize 2
+--[[
+    REDLINER - Custom Menu (Severe)
+]]
+
+------------------------------------------------------------
+-- LOCALS
+------------------------------------------------------------
+local pcall          = pcall
+local tick           = tick
+local task_wait      = task.wait
+local task_spawn     = task.spawn
+local ipairs         = ipairs
+local next           = next
+local tostring       = tostring
+local math_floor     = math.floor
+local math_sqrt      = math.sqrt
+local math_huge      = math.huge
+local math_clamp     = math.clamp
+local math_abs       = math.abs
+local math_max       = math.max
+local string_lower   = string.lower
+local string_find    = string.find
+local table_insert   = table.insert
+local table_clear    = table.clear
+
+local Players       = game:GetService("Players")
+local RunService    = game:GetService("RunService")
+local UserInput     = game:GetService("UserInputService")
+local Workspace     = game:GetService("Workspace")
+
+local LocalPlayer   = Players.LocalPlayer
+local CurrentCamera = Workspace.CurrentCamera
+
+------------------------------------------------------------
+-- CONFIG
+------------------------------------------------------------
+local CONFIG_FILE = "redliner_config.json"
+
+local Config = {
+    AutoParry        = false,
+    ParryLatency     = 0,
+    ParryCooldown    = 300,
+    OffsetSiege      = 400,
+    OffsetMonarch    = 1300,
+    OffsetPhoenix    = 750,
+    OffsetCross      = 450,
+
+    AutoClick        = false,
+    AuraRange        = 22.5,
+    AttackCooldown   = 0.15,
+    AuraInterval     = 0.033,
+    UsePressRelease  = true,
+    RequireFocus     = true,
+    VerifyTarget     = true,
+
+    ESP_Boxes        = false,
+    ESP_Names        = false,
+    ESP_HealthBar    = false,
+    ESP_HealthText   = false,
+    ESP_Tracers      = false,
+    ESP_Distance     = false,
+    ESP_TeamCheck    = true,
+    ESP_MaxDist      = 500,
+
+    AutoWallrun      = false,
+    AutoDash         = false,
+
+    ShowDebug        = false,
+    FpsBoost         = false,
+    ParryKey         = 0x46,
+}
+
+local MenuVisible = true
+
+------------------------------------------------------------
+-- DEBUG STATE
+------------------------------------------------------------
+local Debug = {
+    auraLoopAlive     = false,
+    auraTickCount     = 0,
+    lastAuraTick      = 0,
+    targetsFound      = 0,
+    playersInGame     = 0,
+    playersIterated   = 0,
+    playersBlocked    = 0,
+    playersNoHealth   = 0,
+    playersOutOfRange = 0,
+    attackAttempts    = 0,
+    attackSuccess     = 0,
+    lastAttackResult  = "none",
+    lastError         = "",
+    myPos             = "nil",
+    healthCheckResult = "?",
+    rbxActive         = false,
+    playerListMethod  = "?",
+    saveCount         = 0,
+    lastSaveAttempt   = "",
+    lastChangedKey    = "none",
+    lastChangedVal    = "",
+}
+
+------------------------------------------------------------
+-- HELPER: snap to step
+------------------------------------------------------------
+local function snapToStep(value, step, min, max)
+    local steps = math_floor((value - min) / step + 0.5)
+    local snapped = min + steps * step
+    if snapped < min then snapped = min end
+    if snapped > max then snapped = max end
+    return snapped
+end
+
+------------------------------------------------------------
+-- CONFIG SAVE / LOAD
+------------------------------------------------------------
+local function saveConfig()
+    Debug.lastSaveAttempt = "trying..."
+    local ok, encoded = pcall(function() return crypt.json.encode(Config) end)
+    if not ok then
+        Debug.lastSaveAttempt = "encode FAIL: " .. tostring(encoded):sub(1, 30)
+        return false
+    end
+    local ok2, err = pcall(function() writefile(CONFIG_FILE, encoded) end)
+    if ok2 then
+        Debug.saveCount = Debug.saveCount + 1
+        Debug.lastSaveAttempt = "OK #" .. Debug.saveCount .. " (" .. #encoded .. "b)"
+        return true
+    else
+        Debug.lastSaveAttempt = "writefile FAIL: " .. tostring(err):sub(1, 30)
+        return false
+    end
+end
+
+local function loadConfig()
+    local ok, exists = pcall(function() return isfile(CONFIG_FILE) end)
+    if not ok or not exists then return false end
+    local ok2, content = pcall(function() return readfile(CONFIG_FILE) end)
+    if not ok2 or not content then return false end
+    local ok3, decoded = pcall(function() return crypt.json.decode(content) end)
+    if not ok3 or type(decoded) ~= "table" then return false end
+    for k, v in pairs(decoded) do
+        if Config[k] ~= nil then Config[k] = v end
+    end
+    return true
+end
+
+loadConfig()
+
+-- SANITY CHECK: napraw bezsensowne wartosci
+local function sanitize(key, min, max, default)
+    if type(Config[key]) ~= "number" then
+        Config[key] = default
+        return true
+    end
+    if Config[key] < min or Config[key] > max then
+        Config[key] = default
+        return true
+    end
+    return false
+end
+
+local sanitized = false
+if sanitize("AttackCooldown", 0.05, 1,    0.15)  then sanitized = true end
+if sanitize("AuraInterval",   0.01, 0.2,  0.033) then sanitized = true end
+if sanitize("AuraRange",      4,    40,   22.5)  then sanitized = true end
+if sanitize("ParryLatency",   0,    500,  0)     then sanitized = true end
+if sanitize("ParryCooldown",  50,   1000, 300)   then sanitized = true end
+if sanitize("ESP_MaxDist",    50,   2000, 500)   then sanitized = true end
+if sanitize("OffsetSiege",    500,  1000, 400)   then sanitized = true end
+if sanitize("OffsetMonarch",  1200, 2000, 1300)  then sanitized = true end
+if sanitize("OffsetPhoenix",  600,  1000, 750)   then sanitized = true end
+if sanitize("OffsetCross",    450,  1000, 450)   then sanitized = true end
+
+-- jesli cokolwiek bylo sanitized, zapisz NATYCHMIAST zeby plik byl swiezy
+if sanitized then
+    saveConfig()
+end
+
+------------------------------------------------------------
+-- REDLINER REFS
+------------------------------------------------------------
+local VisualEffects, WorkspEffects
+
+local function refreshReferences()
+    if LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") then
+        VisualEffects = LocalPlayer.PlayerGui:FindFirstChild("VisualEffects")
+    end
+    WorkspEffects = Workspace:FindFirstChild("Effects")
+end
+
+------------------------------------------------------------
+-- BLOCKED PATTERNS
+------------------------------------------------------------
+local BLOCKED_PATTERNS = { "emptydummy", "emptymodel", "placeholder" }
+
+local function isBlockedName(name)
+    if not name then return true end
+    local lower = string_lower(name)
+    for _, pattern in next, BLOCKED_PATTERNS do
+        if string_find(lower, pattern, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+------------------------------------------------------------
+-- PARRY TRIGGERS
+------------------------------------------------------------
+local PARRY_TRIGGERS = {
+    SiegeGlare = "OffsetSiege",
+    MonarchGlare = "OffsetMonarch",
+    PhoenixGlare = "OffsetPhoenix",
+    Cross = "OffsetCross",
+}
+
+------------------------------------------------------------
+-- UI
+------------------------------------------------------------
+local UI = {
+    Position = Vector2.new(200, 150),
+    Size     = Vector2.new(540, 500),
+    TabBarHeight = 32,
+    HeaderHeight = 28,
+    Padding      = 12,
+
+    Colors = {
+        Background  = Color3.fromRGB(15, 15, 18),
+        Header      = Color3.fromRGB(20, 20, 24),
+        TabBar      = Color3.fromRGB(22, 22, 26),
+        TabActive   = Color3.fromRGB(200, 30, 45),
+        Accent      = Color3.fromRGB(220, 35, 50),
+        Text        = Color3.fromRGB(235, 235, 240),
+        TextDim     = Color3.fromRGB(140, 140, 150),
+        Border      = Color3.fromRGB(60, 12, 18),
+        ToggleOn    = Color3.fromRGB(220, 35, 50),
+        ToggleOff   = Color3.fromRGB(55, 55, 62),
+        SliderTrack = Color3.fromRGB(45, 45, 50),
+        SliderFill  = Color3.fromRGB(220, 35, 50),
+        Success     = Color3.fromRGB(0, 200, 100),
+        Warning     = Color3.fromRGB(255, 180, 50),
+        Error       = Color3.fromRGB(255, 60, 60),
+    }
+}
+
+local Tabs       = { "Combat", "ESP", "Glares", "Movement", "Settings" }
+local CurrentTab = "Combat"
+
+local Input = {
+    Mouse           = Vector2.new(0, 0),
+    LeftDown        = false,
+    LeftPressedNow  = false,
+    LeftReleasedNow = false,
+}
+local _prevLeftDown = false
+
+local function updateInput()
+    Input.Mouse           = UserInput:GetMouseLocation()
+    Input.LeftDown        = isleftpressed()
+    Input.LeftPressedNow  = Input.LeftDown and not _prevLeftDown
+    Input.LeftReleasedNow = (not Input.LeftDown) and _prevLeftDown
+    _prevLeftDown         = Input.LeftDown
+end
+
+local function pointInRect(p, pos, size)
+    return p.X >= pos.X and p.X <= pos.X + size.X
+       and p.Y >= pos.Y and p.Y <= pos.Y + size.Y
+end
+
+local Dragging      = false
+local DragOffset    = Vector2.new(0, 0)
+local ClickConsumed = false
+
+-- TRACKING: ktore slidery sa aktualnie przeciagane (dla zapisu po puszczeniu)
+local activeSlider = nil
+local sliderDirty  = false
+
+local function drawRect(pos, size, color, opacity)
+    DrawingImmediate.FilledRectangle(pos, size, color, opacity or 1)
+end
+
+local function drawOutline(pos, size, color, opacity, thickness)
+    DrawingImmediate.Rectangle(pos, size, color, opacity or 1, thickness or 1)
+end
+
+local function drawText(pos, size, color, text, center, opacity)
+    DrawingImmediate.Text(pos, size, color, opacity or 1, text, center or false, "Tamzen")
+end
+
+local function drawOutlinedText(pos, size, color, text, center, opacity)
+    DrawingImmediate.OutlinedText(pos, size, color, opacity or 1, text, center or false, "Tamzen")
+end
+
+local Cursor = Vector2.new(0, 0)
+
+local function Toggle(label, key)
+    local rowPos     = Vector2.new(UI.Position.X + UI.Padding, Cursor.Y)
+    local rowSize    = Vector2.new(UI.Size.X - UI.Padding * 2, 18)
+    local toggleSize = Vector2.new(36, 16)
+    local togglePos  = Vector2.new(UI.Position.X + UI.Size.X - UI.Padding - toggleSize.X, Cursor.Y)
+
+    drawText(Vector2.new(rowPos.X, rowPos.Y), 14, UI.Colors.Text, label, false, 1)
+    local enabled = Config[key]
+    drawRect(togglePos, toggleSize, enabled and UI.Colors.ToggleOn or UI.Colors.ToggleOff, 1)
+    drawOutline(togglePos, toggleSize, UI.Colors.Border, 1, 1)
+
+    local knobSize = Vector2.new(12, 12)
+    local knobPos  = enabled
+        and Vector2.new(togglePos.X + toggleSize.X - knobSize.X - 2, togglePos.Y + 2)
+        or  Vector2.new(togglePos.X + 2, togglePos.Y + 2)
+    drawRect(knobPos, knobSize, UI.Colors.Text, 1)
+
+    if Input.LeftPressedNow and not ClickConsumed then
+        if pointInRect(Input.Mouse, rowPos, rowSize) then
+            Config[key]   = not Config[key]
+            ClickConsumed = true
+            Debug.lastChangedKey = key
+            Debug.lastChangedVal = tostring(Config[key])
+            -- Toggle ZAWSZE zapisuje natychmiast
+            saveConfig()
+        end
+    end
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 26)
+end
+
+local function Slider(label, key, min, max, step, decimals)
+    step     = step     or 1
+    decimals = decimals or 0
+
+    local rowPos = Vector2.new(UI.Position.X + UI.Padding, Cursor.Y)
+    local barSize = Vector2.new(180, 6)
+    local barPos  = Vector2.new(UI.Position.X + UI.Size.X - UI.Padding - barSize.X, Cursor.Y + 6)
+
+    drawText(rowPos, 14, UI.Colors.Text, label, false, 1)
+    local valStr = string.format("%." .. decimals .. "f", Config[key])
+    drawText(Vector2.new(barPos.X - 55, rowPos.Y), 14, UI.Colors.TextDim, valStr, false, 1)
+    drawRect(barPos, barSize, UI.Colors.SliderTrack, 1)
+    local alpha = math_clamp((Config[key] - min) / (max - min), 0, 1)
+    drawRect(barPos, Vector2.new(barSize.X * alpha, barSize.Y), UI.Colors.SliderFill, 1)
+
+    local hitPos  = Vector2.new(barPos.X, barPos.Y - 8)
+    local hitSize = Vector2.new(barSize.X, 22)
+
+    if Input.LeftDown and not Dragging then
+        if pointInRect(Input.Mouse, hitPos, hitSize) then
+            local pct = math_clamp((Input.Mouse.X - barPos.X) / barSize.X, 0, 1)
+            local rawVal = min + (max - min) * pct
+            local newVal = snapToStep(rawVal, step, min, max)
+
+            if newVal ~= Config[key] then
+                Config[key] = newVal
+                Debug.lastChangedKey = key
+                Debug.lastChangedVal = string.format("%." .. decimals .. "f", newVal)
+                activeSlider = key
+                sliderDirty  = true
+            end
+            ClickConsumed = true
+        end
+    end
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 26)
+end
+
+local function Section(title)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 6)
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.Accent, "[ " .. title .. " ]", false, 1)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 22)
+end
+
+------------------------------------------------------------
+-- TAB CONTENT
+------------------------------------------------------------
+local function renderTab_Combat()
+    Section("Auto Parry")
+    Toggle("Auto Parry",            "AutoParry")
+    Slider("Global Latency (ms)",   "ParryLatency",  0, 500,    1,    0)
+    Slider("Parry Cooldown (ms)",   "ParryCooldown", 50, 1000,  5,    0)
+
+    Section("Aura (Vault-style)")
+    Toggle("Auto Click",            "AutoClick")
+    Slider("Aura Range",            "AuraRange",      4, 40,    0.5,  1)
+    Slider("Attack Cooldown (s)",   "AttackCooldown", 0.05, 1,  0.01, 2)
+    Slider("Aura Interval (s)",     "AuraInterval",   0.01, 0.2, 0.005, 3)
+    Toggle("Use Press+Release",     "UsePressRelease")
+    Toggle("Require Focus",         "RequireFocus")
+    Toggle("Verify Target",         "VerifyTarget")
+end
+
+local function renderTab_ESP()
+    Section("Player ESP")
+    Toggle("Boxes",                 "ESP_Boxes")
+    Toggle("Names",                 "ESP_Names")
+    Toggle("Health Bar",            "ESP_HealthBar")
+    Toggle("Health Text",           "ESP_HealthText")
+    Toggle("Tracers",               "ESP_Tracers")
+    Toggle("Distance",              "ESP_Distance")
+    Toggle("Hide Teammates",        "ESP_TeamCheck")
+    Slider("Max Distance",          "ESP_MaxDist",   50, 2000, 10, 0)
+end
+
+local function renderTab_Glares()
+    Section("Glare Latency Offsets (ms)")
+    Slider("Siege Glare",       "OffsetSiege",   500,  1000, 5, 0)
+    Slider("Monarch Glare",     "OffsetMonarch", 1200, 2000, 5, 0)
+    Slider("Phoenix Glare",     "OffsetPhoenix", 600,  1000, 5, 0)
+    Slider("Castigate (Cross)", "OffsetCross",   450,  1000, 5, 0)
+end
+
+local function renderTab_Movement()
+    Section("Movement Assist (WIP)")
+    Toggle("Auto Wallrun", "AutoWallrun")
+    Toggle("Auto Dash",    "AutoDash")
+end
+
+local function renderTab_Settings()
+    Section("Menu")
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim, "Menu toggle: INSERT", false, 1)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 20)
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim,
+        "Overlay FPS: " .. tostring(math_floor(get_overlay_fps())), false, 1)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 20)
+
+    Section("Save Info")
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim,
+        "Save count: " .. Debug.saveCount, false, 1)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 20)
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim,
+        "Last save: " .. Debug.lastSaveAttempt, false, 1)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 20)
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim,
+        "Last changed: " .. Debug.lastChangedKey .. " = " .. Debug.lastChangedVal, false, 1)
+    Cursor = Vector2.new(Cursor.X, Cursor.Y + 20)
+
+    Section("Debug")
+    Toggle("Show Debug Overlay", "ShowDebug")
+end
+
+------------------------------------------------------------
+-- DRAG
+------------------------------------------------------------
+local function handleDrag()
+    if not MenuVisible then return end
+    local headerSize = Vector2.new(UI.Size.X, UI.HeaderHeight)
+    if Input.LeftPressedNow and not Dragging then
+        if pointInRect(Input.Mouse, UI.Position, headerSize) then
+            Dragging      = true
+            DragOffset    = Input.Mouse - UI.Position
+            ClickConsumed = true
+        end
+    end
+    if Dragging then
+        if Input.LeftDown then
+            UI.Position = Input.Mouse - DragOffset
+        else
+            Dragging = false
+        end
+    end
+end
+
+local function handleTabClicks(tabBarPos)
+    if not Input.LeftPressedNow or ClickConsumed then return end
+    local tabWidth = UI.Size.X / #Tabs
+    for i, name in ipairs(Tabs) do
+        local tPos  = Vector2.new(tabBarPos.X + (i-1) * tabWidth, tabBarPos.Y)
+        local tSize = Vector2.new(tabWidth, UI.TabBarHeight)
+        if pointInRect(Input.Mouse, tPos, tSize) then
+            CurrentTab    = name
+            ClickConsumed = true
+            return
+        end
+    end
+end
+
+local function renderMenu()
+    if not MenuVisible then return end
+    local pos  = UI.Position
+    local size = UI.Size
+    drawRect(pos + Vector2.new(4, 4), size, Color3.fromRGB(0,0,0), 0.35)
+    drawRect(pos, size, UI.Colors.Background, 0.96)
+    drawOutline(pos, size, UI.Colors.Border, 1, 1)
+    drawRect(pos, Vector2.new(size.X, UI.HeaderHeight), UI.Colors.Header, 1)
+    drawText(pos + Vector2.new(12, 7), 16, UI.Colors.Accent, "REDLINER", false, 1)
+    drawText(pos + Vector2.new(95, 9), 13, UI.Colors.TextDim, "// severe build", false, 1)
+
+    local tabBarPos = pos + Vector2.new(0, UI.HeaderHeight)
+    drawRect(tabBarPos, Vector2.new(size.X, UI.TabBarHeight), UI.Colors.TabBar, 1)
+    handleTabClicks(tabBarPos)
+
+    local tabWidth = size.X / #Tabs
+    for i, name in ipairs(Tabs) do
+        local tPos  = Vector2.new(tabBarPos.X + (i-1) * tabWidth, tabBarPos.Y)
+        local tSize = Vector2.new(tabWidth, UI.TabBarHeight)
+        local active = (CurrentTab == name)
+        if active then
+            drawRect(Vector2.new(tPos.X, tPos.Y + tSize.Y - 2), Vector2.new(tSize.X, 2), UI.Colors.TabActive, 1)
+        end
+        drawText(Vector2.new(tPos.X + tSize.X/2, tPos.Y + 9), 14,
+            active and UI.Colors.Text or UI.Colors.TextDim, name, true, 1)
+    end
+
+    Cursor = Vector2.new(pos.X + UI.Padding, pos.Y + UI.HeaderHeight + UI.TabBarHeight + UI.Padding)
+    if     CurrentTab == "Combat"   then renderTab_Combat()
+    elseif CurrentTab == "ESP"      then renderTab_ESP()
+    elseif CurrentTab == "Glares"   then renderTab_Glares()
+    elseif CurrentTab == "Movement" then renderTab_Movement()
+    elseif CurrentTab == "Settings" then renderTab_Settings()
+    end
+
+    drawText(Vector2.new(pos.X + UI.Padding, pos.Y + size.Y - 18), 12, UI.Colors.TextDim,
+        "FPS " .. math_floor(get_overlay_fps()) .. "  |  斬", false, 1)
+end
+
+------------------------------------------------------------
+-- DEBUG OVERLAY
+------------------------------------------------------------
+local function renderDebugOverlay()
+    if not Config.ShowDebug then return end
+    local x = 10
+    local y = 100
+    local lineH = 16
+
+    local function line(label, value, color)
+        drawText(Vector2.new(x, y), 13, color or UI.Colors.Text,
+            "[DBG] " .. label .. ": " .. tostring(value), false, 1)
+        y = y + lineH
+    end
+
+    drawRect(Vector2.new(x - 5, y - 5), Vector2.new(320, lineH * 22), Color3.fromRGB(0,0,0), 0.7)
+
+    line("AutoClick", Config.AutoClick, Config.AutoClick and UI.Colors.Success or UI.Colors.TextDim)
+    line("Aura alive", Debug.auraLoopAlive, Debug.auraLoopAlive and UI.Colors.Success or UI.Colors.Error)
+    line("Ticks", Debug.auraTickCount)
+    line("Targets found", Debug.targetsFound, Debug.targetsFound > 0 and UI.Colors.Success or UI.Colors.Warning)
+    line("Health check", Debug.healthCheckResult)
+    line("Attack OK", Debug.attackSuccess)
+    line("Last result", Debug.lastAttackResult)
+    line("--- SAVE ---", "", UI.Colors.Warning)
+    line("Save count", Debug.saveCount, Debug.saveCount > 0 and UI.Colors.Success or UI.Colors.Error)
+    line("Last save", Debug.lastSaveAttempt)
+    line("Last changed key", Debug.lastChangedKey)
+    line("Last changed val", Debug.lastChangedVal)
+    line("Active slider", activeSlider or "none")
+    line("Slider dirty", sliderDirty)
+    line("AttackCooldown", Config.AttackCooldown)
+    line("AuraInterval", Config.AuraInterval)
+    line("AuraRange", Config.AuraRange)
+end
+
+------------------------------------------------------------
+-- MENU TOGGLE
+------------------------------------------------------------
+local lastToggleState = false
+
+local function isInsertPressed()
+    local ok, keys = pcall(getpressedkeys)
+    if ok and keys then
+        for _, key in ipairs(keys) do
+            local k = tostring(key):upper()
+            if k == "INSERT" or k == "INS" or k == "VK_INSERT" then return true end
+        end
+    end
+    return false
+end
+
+local function handleMenuToggle()
+    local pressed = isInsertPressed()
+    if pressed and not lastToggleState then
+        MenuVisible = not MenuVisible
+    end
+    lastToggleState = pressed
+end
+
+------------------------------------------------------------
+-- HELPERS
+------------------------------------------------------------
+local function vdist(a, b)
+    local dx = a.X - b.X
+    local dy = a.Y - b.Y
+    local dz = a.Z - b.Z
+    return math_sqrt(dx*dx + dy*dy + dz*dz)
+end
+
+local function distanceSq(a, b)
+    if not a or not b then return math_huge end
+    local dx = b.X - a.X
+    local dy = b.Y - a.Y
+    local dz = b.Z - a.Z
+    return dx*dx + dy*dy + dz*dz
+end
+
+local function getMyPosition()
+    if not LocalPlayer then return nil end
+    local ok, char = pcall(function() return LocalPlayer.Character end)
+    if not ok or not char then return nil end
+    local ok2, root = pcall(function() return char:FindFirstChild("HumanoidRootPart") end)
+    if not ok2 or not root then return nil end
+    local ok3, pos = pcall(function() return root.Position end)
+    return ok3 and pos or nil
+end
+
+local function getPlayersList()
+    local ok1, list1 = pcall(function() return Players:GetPlayers() end)
+    if ok1 and list1 and type(list1) == "table" then
+        local count = 0
+        for _ in pairs(list1) do count = count + 1 end
+        if count > 0 then
+            Debug.playerListMethod = "GetPlayers (" .. count .. ")"
+            return list1, count
+        end
+    end
+    local ok2, list2 = pcall(function() return Players:GetChildren() end)
+    if ok2 and list2 and type(list2) == "table" then
+        local count = 0
+        for _ in pairs(list2) do count = count + 1 end
+        if count > 0 then
+            Debug.playerListMethod = "GetChildren (" .. count .. ")"
+            return list2, count
+        end
+    end
+    Debug.playerListMethod = "FAILED"
+    return {}, 0
+end
+
+local function getHealth(player)
+    local ok, ro = pcall(function() return player:FindFirstChild("ReadOnly") end)
+    if ok and ro then
+        local ok2, hv = pcall(function() return ro:FindFirstChild("health") end)
+        if ok2 and hv then
+            local ok3, val = pcall(function() return hv.Value end)
+            if ok3 and val ~= nil then
+                Debug.healthCheckResult = "RO.health=" .. tostring(val)
+                return val
+            end
+        end
+    end
+    local ok4, char = pcall(function() return player.Character end)
+    if ok4 and char then
+        local ok5, hum = pcall(function() return char:FindFirstChildOfClass("Humanoid") end)
+        if ok5 and hum then
+            local ok6, h = pcall(function() return hum.Health end)
+            if ok6 and h ~= nil then
+                Debug.healthCheckResult = "Hum=" .. tostring(h)
+                return h
+            end
+        end
+        local ok7, root = pcall(function() return char:FindFirstChild("HumanoidRootPart") end)
+        if ok7 and root then
+            Debug.healthCheckResult = "ALIVE"
+            return 100
+        end
+    end
+    Debug.healthCheckResult = "NONE"
+    return nil
+end
+
+------------------------------------------------------------
+-- MAX HEALTH
+------------------------------------------------------------
+local maxHealthCache = {}
+local charRefCache   = {}
+
+local function getMaxHealth(player, currentHealth)
+    if not currentHealth or currentHealth <= 0 then
+        return maxHealthCache[player] or 100
+    end
+    local cached = maxHealthCache[player]
+    if not cached then
+        maxHealthCache[player] = currentHealth
+        return currentHealth
+    end
+    if currentHealth > cached then
+        maxHealthCache[player] = currentHealth
+        return currentHealth
+    end
+    return cached
+end
+
+task_spawn(function()
+    while true do
+        task_wait(10)
+        local ok, all = pcall(function() return Players:GetPlayers() end)
+        if ok and all then
+            local active = {}
+            for _, p in ipairs(all) do active[p] = true end
+            for p in pairs(maxHealthCache) do
+                if not active[p] then maxHealthCache[p] = nil end
+            end
+            for p in pairs(charRefCache) do
+                if not active[p] then charRefCache[p] = nil end
+            end
+        end
+    end
+end)
+
+task_spawn(function()
+    while true do
+        task_wait(0.5)
+        local ok, all = pcall(function() return Players:GetPlayers() end)
+        if ok and all then
+            for _, p in ipairs(all) do
+                if p ~= LocalPlayer then
+                    local okC, char = pcall(function() return p.Character end)
+                    if okC and char then
+                        if charRefCache[p] ~= char then
+                            maxHealthCache[p] = nil
+                            charRefCache[p] = char
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+------------------------------------------------------------
+-- AURA
+------------------------------------------------------------
+local cachedTargets  = {}
+local lastTargetScan = 0
+local lastAttack     = 0
+local lastAuraUpdate = 0
+
+local function scanTargets()
+    Debug.playersIterated = 0
+    Debug.playersBlocked = 0
+    Debug.playersNoHealth = 0
+    Debug.playersOutOfRange = 0
+
+    local targets = {}
+    local myPos = getMyPosition()
+    if not myPos then
+        Debug.myPos = "nil"
+        return targets
+    end
+    Debug.myPos = string.format("%.0f,%.0f,%.0f", myPos.X, myPos.Y, myPos.Z)
+
+    local all, count = getPlayersList()
+    Debug.playersInGame = count
+    if count == 0 then return targets end
+
+    local rangeSq = Config.AuraRange * Config.AuraRange
+
+    for _, p in pairs(all) do
+        Debug.playersIterated = Debug.playersIterated + 1
+        if p ~= LocalPlayer then
+            local okN, name = pcall(function() return p.Name end)
+            if not okN or not name then
+                Debug.playersBlocked = Debug.playersBlocked + 1
+            elseif isBlockedName(name) then
+                Debug.playersBlocked = Debug.playersBlocked + 1
+            else
+                local health = getHealth(p)
+                if not health or health <= 0 then
+                    Debug.playersNoHealth = Debug.playersNoHealth + 1
+                else
+                    local okC, char = pcall(function() return p.Character end)
+                    if okC and char then
+                        local okR, root = pcall(function() return char:FindFirstChild("HumanoidRootPart") end)
+                        if okR and root then
+                            local okP, rootPos = pcall(function() return root.Position end)
+                            if okP and rootPos then
+                                local distSq = distanceSq(myPos, rootPos)
+                                if distSq <= rangeSq then
+                                    table_insert(targets, {
+                                        player = p,
+                                        root = root,
+                                        health = health,
+                                        distance = math_sqrt(distSq),
+                                    })
+                                else
+                                    Debug.playersOutOfRange = Debug.playersOutOfRange + 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return targets
+end
+
+local function getAllTargets()
+    local now = tick()
+    if now - lastTargetScan >= 0.1 then
+        cachedTargets = scanTargets()
+        lastTargetScan = now
+    end
+    return cachedTargets
+end
+
+local function performAttack()
+    Debug.attackAttempts = Debug.attackAttempts + 1
+    local now = tick()
+    if now - lastAttack < (Config.AttackCooldown - 0.02) then
+        Debug.lastAttackResult = "cooldown"
+        return false
+    end
+    if Config.RequireFocus then
+        local okF, focused = pcall(isrbxactive)
+        Debug.rbxActive = okF and focused or false
+        if okF and not focused then
+            Debug.lastAttackResult = "not focused"
+            return false
+        end
+    end
+    lastAttack = now
+
+    if Config.UsePressRelease then
+        local ok1 = pcall(mouse1press)
+        if ok1 then
+            task_wait(0.016)
+            pcall(mouse1release)
+            Debug.lastAttackResult = "press OK"
+            Debug.attackSuccess = Debug.attackSuccess + 1
+            return true
+        end
+        Debug.lastAttackResult = "press FAILED"
+        return false
+    end
+
+    local ok = pcall(mouse1click)
+    Debug.lastAttackResult = "click=" .. tostring(ok)
+    if ok then Debug.attackSuccess = Debug.attackSuccess + 1 end
+    return ok
+end
+
+local function updateAura()
+    if not Config.AutoClick then return end
+    local now = tick()
+    if now - lastAuraUpdate < Config.AuraInterval then return end
+    lastAuraUpdate = now
+    Debug.auraTickCount = Debug.auraTickCount + 1
+    Debug.lastAuraTick = now
+
+    local targets = getAllTargets()
+    Debug.targetsFound = #targets
+
+    if #targets > 0 then
+        local target = targets[1]
+        if Config.VerifyTarget and target.root then
+            local ok, curPos = pcall(function() return target.root.Position end)
+            local myPos = getMyPosition()
+            if ok and curPos and myPos then
+                if distanceSq(myPos, curPos) <= Config.AuraRange * Config.AuraRange then
+                    performAttack()
+                end
+            else
+                performAttack()
+            end
+        else
+            performAttack()
+        end
+    end
+end
+
+------------------------------------------------------------
+-- ESP RENDER
+------------------------------------------------------------
+local function getTeam(player)
+    local ok, t = pcall(function() return player.Team end)
+    if ok and t then return t end
+    return nil
+end
+
+local function w2s(pos)
+    local ok, v, onScreen = pcall(function()
+        return CurrentCamera:WorldToScreenPoint(pos)
+    end)
+    if not ok or not v then return Vector2.new(0,0), false end
+    return Vector2.new(v.X, v.Y), onScreen
+end
+
+local function healthColor(pct)
+    if pct > 0.5 then
+        local t = (pct - 0.5) * 2
+        return Color3.new(1 - t, 1, 0)
+    else
+        local t = pct * 2
+        return Color3.new(1, t, 0)
+    end
+end
+
+local function renderESP()
+    local anyESP = Config.ESP_Boxes or Config.ESP_Names or Config.ESP_HealthBar
+                or Config.ESP_HealthText or Config.ESP_Tracers or Config.ESP_Distance
+    if not anyESP then return end
+
+    local myPos = getMyPosition()
+    if not myPos then return end
+
+    local myTeam = Config.ESP_TeamCheck and getTeam(LocalPlayer) or nil
+
+    CurrentCamera = Workspace.CurrentCamera
+    if not CurrentCamera then return end
+
+    local rvOk, rv = pcall(function() return CurrentCamera.RightVector end)
+    if not rvOk or not rv then return end
+
+    local vpOk, vp = pcall(function() return CurrentCamera.ViewportSize end)
+    if not vpOk or not vp then return end
+    local vpX = vp.X
+    local vpY = vp.Y
+
+    local all = getPlayersList()
+    for _, plr in pairs(all) do
+        if plr == LocalPlayer then continue end
+
+        if myTeam then
+            local pTeam = getTeam(plr)
+            if pTeam and pTeam == myTeam then continue end
+        end
+
+        local okC, char = pcall(function() return plr.Character end)
+        if not okC or not char then continue end
+
+        local okR, root = pcall(function() return char:FindFirstChild("HumanoidRootPart") end)
+        if not okR or not root then continue end
+
+        local okH, head = pcall(function() return char:FindFirstChild("Head") end)
+        if not okH or not head then continue end
+
+        local rootPos = nil
+        pcall(function() rootPos = root.Position end)
+        if not rootPos then continue end
+
+        local headPos = nil
+        pcall(function() headPos = head.Position end)
+        if not headPos then continue end
+
+        local health = getHealth(plr)
+        if not health or health <= 0 then continue end
+
+        local maxHealth = getMaxHealth(plr, health)
+        local healthPct = math_clamp(health / maxHealth, 0, 1)
+
+        local d = vdist(myPos, rootPos)
+        if d > Config.ESP_MaxDist then continue end
+
+        local topScreen, topVis = w2s(Vector3.new(headPos.X, headPos.Y + 1.5, headPos.Z))
+        local botScreen, botVis = w2s(Vector3.new(rootPos.X, rootPos.Y - 3.3, rootPos.Z))
+        if not topVis or not botVis then continue end
+
+        local boxH = botScreen.Y - topScreen.Y
+        if boxH < 8 then continue end
+
+        local hw = 2.5
+        local lEdge = w2s(Vector3.new(rootPos.X - rv.X*hw, rootPos.Y, rootPos.Z - rv.Z*hw))
+        local rEdge = w2s(Vector3.new(rootPos.X + rv.X*hw, rootPos.Y, rootPos.Z + rv.Z*hw))
+        local boxW  = math_abs(rEdge.X - lEdge.X)
+        if boxW < 6 then boxW = boxH * 0.5 end
+
+        local centerX = (lEdge.X + rEdge.X) / 2
+        local boxX    = centerX - boxW/2
+        local boxY    = topScreen.Y
+
+        local mainColor = UI.Colors.Accent
+
+        if Config.ESP_Boxes then
+            DrawingImmediate.Rectangle(
+                Vector2.new(boxX-1, boxY-1),
+                Vector2.new(boxW+2, boxH+2),
+                Color3.new(0,0,0), 0.6, 1
+            )
+            DrawingImmediate.Rectangle(
+                Vector2.new(boxX, boxY),
+                Vector2.new(boxW, boxH),
+                mainColor, 0.9, 1.5
+            )
+        end
+
+        if Config.ESP_HealthBar then
+            local barW = 3
+            local barH = boxH
+            local barX = boxX - barW - 4
+            local barY = boxY
+
+            DrawingImmediate.FilledRectangle(
+                Vector2.new(barX - 1, barY - 1),
+                Vector2.new(barW + 2, barH + 2),
+                Color3.new(0, 0, 0), 0.7
+            )
+            DrawingImmediate.FilledRectangle(
+                Vector2.new(barX, barY),
+                Vector2.new(barW, barH),
+                Color3.fromRGB(30, 30, 30), 0.9
+            )
+            local fillH = barH * healthPct
+            DrawingImmediate.FilledRectangle(
+                Vector2.new(barX, barY + barH - fillH),
+                Vector2.new(barW, fillH),
+                healthColor(healthPct), 1
+            )
+        end
+
+        local ty = boxY - 16
+        if Config.ESP_Names then
+            local okN, name = pcall(function() return plr.DisplayName end)
+            if not okN or not name then
+                pcall(function() name = plr.Name end)
+            end
+            if name then
+                drawOutlinedText(
+                    Vector2.new(centerX, ty), 13,
+                    Color3.new(1,1,1), name, true, 1
+                )
+                ty = ty - 14
+            end
+        end
+
+        if Config.ESP_HealthText then
+            local hpText = math_floor(health) .. "/" .. math_floor(maxHealth) .. " HP"
+            drawOutlinedText(
+                Vector2.new(centerX, ty), 12,
+                healthColor(healthPct), hpText, true, 1
+            )
+        end
+
+        if Config.ESP_Distance then
+            drawOutlinedText(
+                Vector2.new(centerX, botScreen.Y + 4), 11,
+                Color3.fromRGB(180, 180, 180),
+                math_floor(d) .. "st", true, 0.9
+            )
+        end
+
+        if Config.ESP_Tracers then
+            DrawingImmediate.Line(
+                Vector2.new(vpX/2, vpY),
+                Vector2.new(centerX, botScreen.Y),
+                mainColor, 0.55, 1, 1.5
+            )
+        end
+    end
+end
+
+------------------------------------------------------------
+-- PARRY
+------------------------------------------------------------
+local parryActive    = false
+local lastParryTime  = 0
+local validatedParry = 0
+local seenIndicators = {}
+
+local function getGlareDelay(indicatorName)
+    local key = PARRY_TRIGGERS[indicatorName]
+    if not key then return 0 end
+    return Config[key] or 0
+end
+
+local function tryParry(indicator, iaddress)
+    if parryActive then return end
+    local now = os.clock() * 1000
+    if (now - lastParryTime) < Config.ParryCooldown then return end
+    local glareDelay = getGlareDelay(indicator.Name)
+    parryActive = true
+
+    task_spawn(function()
+        local totalDelay = Config.ParryLatency + glareDelay
+        if totalDelay > 0 then task_wait(totalDelay / 1000) end
+        keypress(Config.ParryKey)
+        task_wait(0.03)
+        keyrelease(Config.ParryKey)
+        local a1 = os.clock()
+        parryActive   = false
+        lastParryTime = os.clock() * 1000
+        local start = os.clock()
+        while true do
+            task_wait(0.01)
+            if os.clock() - validatedParry < 0.2 then break end
+            if os.clock() - start > 0.5 then break end
+        end
+        seenIndicators[iaddress] = nil
+    end)
+end
+
+local function getAddress(obj)
+    local ok, addr = pcall(function() return tostring(obj) end)
+    return ok and addr or (obj.Name .. "_" .. tostring(math.random(1, 99999)))
+end
+
+local function processParryTriggers()
+    if not Config.AutoParry then
+        table_clear(seenIndicators)
+        parryActive = false
+        return
+    end
+    if not isrbxactive() then return end
+    refreshReferences()
+
+    if VisualEffects then
+        for _, child in ipairs(VisualEffects:GetChildren()) do
+            if PARRY_TRIGGERS[child.Name] then
+                local addr = getAddress(child)
+                if not seenIndicators[addr] then
+                    seenIndicators[addr] = os.clock()
+                    tryParry(child, addr)
+                end
+            end
+        end
+    end
+
+    if WorkspEffects then
+        local char = LocalPlayer and LocalPlayer.Character
+        if char then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root then
+                local rootPos = root.Position
+                for _, child in ipairs(WorkspEffects:GetChildren()) do
+                    if child.Name == "defaultParry" then
+                        local part = nil
+                        for _, v in ipairs(child:GetDescendants()) do
+                            if v.Name == "SparkDots" then
+                                part = v.Parent
+                                break
+                            end
+                        end
+                        if part then
+                            local partPos = nil
+                            pcall(function() partPos = part.Position end)
+                            if partPos then
+                                local d = vdist(partPos, rootPos)
+                                if d < 10 then
+                                    local addr = "validated_" .. getAddress(part)
+                                    if not seenIndicators[addr] then
+                                        seenIndicators[addr] = true
+                                        validatedParry = os.clock()
+                                        lastParryTime  = 0
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+------------------------------------------------------------
+-- MAIN RENDER LOOP
+------------------------------------------------------------
+RunService.Render:Connect(function()
+    ClickConsumed = false
+    updateInput()
+    handleMenuToggle()
+    handleDrag()
+    pcall(renderESP)
+    renderDebugOverlay()
+    renderMenu()
+
+    -- ZAPISZ NATYCHMIAST gdy puscisz slider z dirty
+    if sliderDirty and Input.LeftReleasedNow then
+        saveConfig()
+        sliderDirty = false
+        activeSlider = nil
+    end
+end)
+
+task_spawn(function()
+    refreshReferences()
+    while true do
+        pcall(processParryTriggers)
+        task_wait()
+    end
+end)
+
+task_spawn(function()
+    Debug.auraLoopAlive = true
+    while true do
+        Debug.auraLoopAlive = true
+        local ok, err = pcall(updateAura)
+        if not ok then
+            Debug.lastError = tostring(err):sub(1, 50)
+        end
+        task_wait(0.01)
+    end
+end)
+
+task_spawn(function()
+    while true do
+        task_wait(2)
+        pcall(refreshReferences)
+    end
+end)
+
+-- BACKUP autosave loop - co 2s sprawdza czy slider zostal puszczony bez zapisu
+task_spawn(function()
+    while true do
+        task_wait(2)
+        if sliderDirty and not Input.LeftDown then
+            saveConfig()
+            sliderDirty = false
+            activeSlider = nil
+        end
+    end
+end)
+
+print("[REDLINER] Loaded. INSERT = toggle menu.")
