@@ -172,7 +172,6 @@ if sanitize("OffsetMonarch",  1200, 2000, 1300)  then sanitized = true end
 if sanitize("OffsetPhoenix",  600,  1000, 750)   then sanitized = true end
 if sanitize("OffsetCross",    450,  1000, 450)   then sanitized = true end
 
--- jesli cokolwiek bylo sanitized, zapisz NATYCHMIAST zeby plik byl swiezy
 if sanitized then
     saveConfig()
 end
@@ -272,7 +271,6 @@ local Dragging      = false
 local DragOffset    = Vector2.new(0, 0)
 local ClickConsumed = false
 
--- TRACKING: ktore slidery sa aktualnie przeciagane (dla zapisu po puszczeniu)
 local activeSlider = nil
 local sliderDirty  = false
 
@@ -317,7 +315,6 @@ local function Toggle(label, key)
             ClickConsumed = true
             Debug.lastChangedKey = key
             Debug.lastChangedVal = tostring(Config[key])
-            -- Toggle ZAWSZE zapisuje natychmiast
             saveConfig()
         end
     end
@@ -414,7 +411,7 @@ end
 
 local function renderTab_Settings()
     Section("Menu")
-    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim, "Menu toggle: INSERT", false, 1)
+    drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim, "Menu toggle: RIGHT SHIFT", false, 1)
     Cursor = Vector2.new(Cursor.X, Cursor.Y + 20)
     drawText(Vector2.new(Cursor.X, Cursor.Y), 13, UI.Colors.TextDim,
         "Overlay FPS: " .. tostring(math_floor(get_overlay_fps())), false, 1)
@@ -547,23 +544,25 @@ local function renderDebugOverlay()
 end
 
 ------------------------------------------------------------
--- MENU TOGGLE
+-- MENU TOGGLE - RIGHT SHIFT
 ------------------------------------------------------------
 local lastToggleState = false
 
-local function isInsertPressed()
+local function isRightShiftPressed()
     local ok, keys = pcall(getpressedkeys)
     if ok and keys then
         for _, key in ipairs(keys) do
             local k = tostring(key):upper()
-            if k == "INSERT" or k == "INS" or k == "VK_INSERT" then return true end
+            if k == "RIGHTSHIFT" or k == "RIGHT SHIFT" or k == "RSHIFT" or k == "VK_RSHIFT" then
+                return true
+            end
         end
     end
     return false
 end
 
 local function handleMenuToggle()
-    local pressed = isInsertPressed()
+    local pressed = isRightShiftPressed()
     if pressed and not lastToggleState then
         MenuVisible = not MenuVisible
     end
@@ -1149,7 +1148,6 @@ RunService.Render:Connect(function()
     renderDebugOverlay()
     renderMenu()
 
-    -- ZAPISZ NATYCHMIAST gdy puscisz slider z dirty
     if sliderDirty and Input.LeftReleasedNow then
         saveConfig()
         sliderDirty = false
@@ -1184,7 +1182,6 @@ task_spawn(function()
     end
 end)
 
--- BACKUP autosave loop - co 2s sprawdza czy slider zostal puszczony bez zapisu
 task_spawn(function()
     while true do
         task_wait(2)
@@ -1196,4 +1193,4 @@ task_spawn(function()
     end
 end)
 
-print("[REDLINER] Loaded. INSERT = toggle menu.")
+print("[REDLINER] Loaded. RIGHT SHIFT = toggle menu.")
